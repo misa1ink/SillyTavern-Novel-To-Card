@@ -357,6 +357,172 @@
     white-space: nowrap;
 }
 
+/* ---------------- 主开关 ---------------- */
+
+#n2c-panel .n2c-head {
+    align-items: center;
+}
+
+#n2c-panel .n2c-head-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+}
+
+#n2c-panel .n2c-master {
+    margin: 0;
+    font-size: 11px;
+    gap: 4px;
+}
+
+#n2c-panel.n2c-off .n2c-body {
+    opacity: 0.42;
+    filter: grayscale(0.6);
+    pointer-events: none;
+    user-select: none;
+}
+
+#n2c-panel.n2c-off .n2c-body::after {
+    content: '插件已关闭 —— 勾选右上角「启用」后可继续使用';
+    display: block;
+    padding: 12px;
+    text-align: center;
+    font-size: 12px;
+    opacity: 0.9;
+}
+
+/* ---------------- 抽屉槽位 ---------------- */
+
+#n2c-panel .n2c-drawer-slot {
+    padding: 6px 0;
+}
+
+#n2c-panel .n2c-drawer-slot.n2c-slot-hidden {
+    display: none;
+}
+
+/* ---------------- 独立窗口 ---------------- */
+
+.n2c-window {
+    position: fixed;
+    z-index: 4000;
+    display: flex;
+    flex-direction: column;
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--color-background-primary, #1a1a1a);
+    color: var(--color-text-primary, #e6e6e6);
+    border: 1px solid var(--color-border-secondary, rgba(128, 128, 128, 0.45));
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.n2c-window-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    cursor: move;
+    user-select: none;
+    background: var(--color-background-secondary, rgba(128, 128, 128, 0.14));
+    border-bottom: 0.5px solid var(--color-border-tertiary, rgba(128, 128, 128, 0.3));
+    flex-shrink: 0;
+}
+
+.n2c-window-title {
+    font-size: 12px;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.n2c-window-actions {
+    margin-left: auto;
+    display: flex;
+    gap: 4px;
+}
+
+.n2c-win-btn {
+    width: 22px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 11px;
+    opacity: 0.75;
+}
+
+.n2c-win-btn:hover {
+    opacity: 1;
+    background: rgba(128, 128, 128, 0.25);
+}
+
+.n2c-window-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 10px 12px 16px;
+}
+
+/* 窗口内的面板不再需要外层折叠头 */
+.n2c-window-body #n2c-panel > .inline-drawer-header {
+    display: none;
+}
+
+.n2c-window-body #n2c-panel,
+.n2c-window-body #n2c-panel > .inline-drawer-content {
+    border: none;
+    padding: 0;
+    margin: 0;
+    background: none;
+}
+
+/* 顶栏图标关闭态 */
+#n2c-drawer-icon.n2c-icon-off {
+    opacity: 0.4;
+}
+
+/* ---------------- 存档列表 ---------------- */
+
+#n2c-panel .n2c-save-list,
+.n2c-window .n2c-save-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 8px;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.n2c-save-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 5px;
+    background: var(--color-background-secondary, rgba(128, 128, 128, 0.08));
+}
+
+.n2c-save-main {
+    flex: 1;
+    min-width: 0;
+}
+
+.n2c-save-name {
+    font-size: 12px;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.n2c-save-meta {
+    font-size: 10px;
+    opacity: 0.62;
+}
+
 /* ---------------- 日志 ---------------- */
 
 #n2c-panel .n2c-log-head {

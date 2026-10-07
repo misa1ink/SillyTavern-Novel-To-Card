@@ -13,15 +13,17 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
 
+import { createFakeIndexedDB } from './fake-indexeddb.mjs';
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(here, '..');
 
 let passed = 0;
 let failed = 0;
 
-function check(name, fn) {
+async function check(name, fn) {
     try {
-        fn();
+        await fn();
         passed++;
         console.log(`  ok   ${name}`);
     } catch (error) {
@@ -53,45 +55,69 @@ class FakeElement {
         this.dataset = {};
         this.classList = new FakeClassList(this);
         this._id = '';
-        this._html = '';
-        this.textContent = '';
+        this._text = '';
+        this._classes = [];
+        this._listeners = new Map();
+        this.attributes = {};
         this.value = '';
         this.checked = false;
         this.disabled = false;
-        this.attributes = {};
-        this._listeners = new Map();
         this.files = [];
+        this.scrollTop = 0;
+        this.scrollHeight = 0;
     }
 
     get id() { return this._id; }
-    set id(value) { this._id = value; registry.set(value, this); }
+    set id(value) {
+        if (this._id && registry.get(this._id) === this) registry.delete(this._id);
+        this._id = value;
+        if (value) registry.set(value, this);
+    }
 
-    get innerHTML() { return this._html; }
-    set innerHTML(value) { this._html = String(value); }
+    get className() { return this._classes.join(' '); }
+    set className(value) {
+        this._classes = String(value).split(/\s+/).filter(Boolean);
+        this.classList = new FakeClassList(this);
+        for (const cls of this._classes) this.classList.add(cls);
+    }
+
+    get textContent() { return this._text; }
+    set textContent(value) { this._text = String(value); }
+
+    /** innerHTML 赋值也会解析成真实节点，保持与浏览器一致 */
+    get innerHTML() { return this._html ?? ''; }
+    set innerHTML(value) {
+        for (const child of [...this.children]) this.removeChild(child);
+        this._html = String(value);
+        const parsed = parseHtml(this._html);
+        for (const child of [...parsed.children]) this.appendChild(child);
+    }
 
     setAttribute(name, value) { this.attributes[name] = String(value); }
     getAttribute(name) { return this.attributes[name] ?? null; }
     removeAttribute(name) { delete this.attributes[name]; }
 
     appendChild(child) {
+        if (child.parentNode) child.parentNode.removeChild(child);
         child.parentNode = this;
         this.children.push(child);
+        registerTree(child);
         return child;
     }
     removeChild(child) {
         this.children = this.children.filter(item => item !== child);
+        child.parentNode = null;
+        unregisterTree(child);
         return child;
     }
     remove() {
         if (this.parentNode) this.parentNode.removeChild(this);
-        if (this._id) registry.delete(this._id);
+        else unregisterTree(this);
     }
     insertAdjacentHTML(_position, html) {
-        // 面板 HTML 会被塞进来；把里面的 id 注册出来，模拟真实 DOM 的 id 查询
-        this._html += String(html);
-        for (const match of String(html).matchAll(/id="([^"]+)"/g)) {
-            if (!registry.has(match[1])) registry.set(match[1], new FakeElement());
-        }
+        const parsed = parseHtml(html);
+        for (const child of [...parsed.children]) this.appendChild(child);
+        this._html = (this._html ?? '') + String(html);
     }
     addEventListener(type, handler) {
         if (!this._listeners.has(type)) this._listeners.set(type, []);
@@ -101,18 +127,94 @@ class FakeElement {
         const list = this._listeners.get(type) || [];
         this._listeners.set(type, list.filter(item => item !== handler));
     }
-    /** 测试里手动触发事件用 */
     dispatch(type, event = {}) {
-        for (const handler of this._listeners.get(type) || []) {
+        for (const handler of [...(this._listeners.get(type) || [])]) {
             handler({ target: this, preventDefault() {}, stopPropagation() {}, ...event });
         }
     }
-    querySelector(selector) { return query(selector); }
-    querySelectorAll() { return []; }
     click() { this.dispatch('click', {}); }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+    querySelectorAll(selector) {
+        const wanted = String(selector).trim();
+        const out = [];
+        const walk = node => {
+            for (const child of node.children) {
+                if (matches(child, wanted)) out.push(child);
+                walk(child);
+            }
+        };
+        walk(this);
+        return out;
+    }
+    /** 节点树里是否包含某个 id（验证移动是否真的发生） */
+    contains(node) {
+        if (node === this) return true;
+        return this.children.some(child => child.contains(node));
+    }
+}
+
+function matches(element, selector) {
+    if (selector.startsWith('.')) {
+        return element.classList.contains(selector.slice(1));
+    }
+    if (selector.startsWith('#')) {
+        return element.id === selector.slice(1);
+    }
+    return element.tagName === selector.toUpperCase();
 }
 
 const registry = new Map();
+
+/** 把元素（含其后代）的 id 注册进去 / 从注册表摘掉 */
+function registerTree(element) {
+    if (!element) return;
+    if (element._id) registry.set(element._id, element);
+    for (const child of element.children || []) registerTree(child);
+}
+
+function unregisterTree(element) {
+    if (!element) return;
+    if (element._id && registry.get(element._id) === element) registry.delete(element._id);
+    for (const child of element.children || []) unregisterTree(child);
+}
+
+/**
+ * 极简 HTML 解析：只认识标签、属性（含 id/class）与文本。
+ * 够 harness 用——目的是让面板 HTML 变成真实节点树，从而能验证节点移动。
+ */
+function parseHtml(html) {
+    const root = new FakeElement('div');
+    const stack = [root];
+    const tokens = String(html).match(/<[^>]+>|[^<]+/g) || [];
+
+    for (const token of tokens) {
+        if (token.startsWith('</')) {
+            if (stack.length > 1) stack.pop();
+            continue;
+        }
+        if (!token.startsWith('<')) {
+            const text = token.trim();
+            if (text) stack[stack.length - 1]._text += text;
+            continue;
+        }
+        const tagMatch = token.match(/^<\s*([a-zA-Z][\w-]*)/);
+        if (!tagMatch) continue;
+        const element = new FakeElement(tagMatch[1]);
+        for (const attr of token.matchAll(/([a-zA-Z_:][\w:.-]*)\s*=\s*"([^"]*)"/g)) {
+            const [, name, value] = attr;
+            if (name === 'id') element.id = value;
+            else if (name === 'class') element._classes = value.split(/\s+/).filter(Boolean);
+            else element.setAttribute(name, value);
+        }
+        for (const cls of element._classes) element.classList.add(cls);
+        stack[stack.length - 1].appendChild(element);
+        // 自闭合 / 空元素
+        if (!/\/>$/.test(token) && !/^(br|hr|img|input|meta|link)$/i.test(tagMatch[1])) {
+            stack.push(element);
+        }
+    }
+    return root;
+}
 
 function query(selector) {
     const text = String(selector);
@@ -178,6 +280,7 @@ const sandbox = {
     fetch: async () => ({ ok: true, status: 200, text: async () => '{}' }),
     atob: value => Buffer.from(value, 'base64').toString('binary'),
     btoa: value => Buffer.from(value, 'binary').toString('base64'),
+    indexedDB: createFakeIndexedDB(),
     jQuery: null,
 };
 sandbox.self = sandbox;
@@ -318,6 +421,170 @@ try {
         const button = registry.get('n2c-preview-split');
         if (!button) throw new Error('找不到预览分卷按钮');
         button.click();
+    });
+
+    // ---- 主开关 ----
+    console.log('\n[9] 独立开关 / 独立窗口 / 中途保存');
+
+    check('面板顶部有主开关和独立窗口按钮', () => {
+        const host = registry.get('extensions_settings');
+        const html = host ? host.innerHTML : '';
+        for (const id of ['n2c-plugin-enabled', 'n2c-open-window', 'n2c-body', 'n2c-drawer-slot']) {
+            if (!html.includes(`id="${id}"`)) throw new Error(`缺少控件 ${id}`);
+        }
+    });
+
+    check('关闭主开关会给面板加置灰类，重新启用会移除', () => {
+        const panel = registry.get('n2c-panel');
+        const toggle = registry.get('n2c-plugin-enabled');
+        if (!panel || !toggle) throw new Error('找不到面板或主开关');
+
+        toggle.checked = false;
+        toggle.dispatch('change');
+        if (!panel.classList.contains('n2c-off')) throw new Error('关闭后没有加上 n2c-off');
+        if (extensionSettingsStub['novel_to_card'].pluginEnabled !== false) {
+            throw new Error('pluginEnabled 没有写回设置');
+        }
+
+        toggle.checked = true;
+        toggle.dispatch('change');
+        if (panel.classList.contains('n2c-off')) throw new Error('重新启用后 n2c-off 没有被移除');
+    });
+
+    check('插件关闭时动作入口被拦住（点预览分卷不发请求）', () => {
+        const toggle = registry.get('n2c-plugin-enabled');
+        toggle.checked = false;
+        toggle.dispatch('change');
+        const button = registry.get('n2c-preview-split');
+        const before = JSON.stringify(usage);
+        button.click();
+        if (JSON.stringify(usage) !== before) throw new Error('关闭状态下仍然产生了副作用');
+        toggle.checked = true;
+        toggle.dispatch('change');
+    });
+
+    check('打开独立窗口会把面板主体搬进窗口', () => {
+        const button = registry.get('n2c-open-window');
+        if (!button) throw new Error('找不到独立窗口按钮');
+        button.click();
+
+        const win = registry.get('n2c-window');
+        if (!win) throw new Error('浮窗没有被创建');
+        const body = registry.get('n2c-body');
+        if (!body) throw new Error('找不到面板主体');
+        if (body.parentNode !== win.querySelector('#n2c-window-body')) {
+            throw new Error('面板主体没有搬进浮窗');
+        }
+        if (extensionSettingsStub['novel_to_card'].useFloatingWindow !== true) {
+            throw new Error('useFloatingWindow 没有写回设置');
+        }
+    });
+
+    check('窗口关闭后主体回到抽屉槽位', () => {
+        const closeButton = registry.get('n2c-window-close');
+        if (!closeButton) throw new Error('找不到窗口关闭按钮');
+        closeButton.click();
+        if (registry.get('n2c-window')) throw new Error('窗口没有被移除');
+        const body = registry.get('n2c-body');
+        const slot = registry.get('n2c-drawer-slot');
+        if (body.parentNode !== slot) throw new Error('面板主体没有回到抽屉槽位');
+        if (extensionSettingsStub['novel_to_card'].useFloatingWindow !== false) {
+            throw new Error('useFloatingWindow 没有被重置');
+        }
+    });
+
+    check('存档能写入 IndexedDB 并列出', async () => {
+        // 先塞一点可保存的进度
+        const characterList = extensionSettingsStub['novel_to_card'];
+        if (!characterList) throw new Error('设置未初始化');
+
+        const saveButton = registry.get('n2c-save-now');
+        if (!saveButton) throw new Error('找不到立即存档按钮');
+        // 无进度时应给出提示而不是抛错
+        saveButton.click();
+
+        const nameInput = registry.get('n2c-save-name');
+        if (nameInput) nameInput.value = '单元测试存档';
+        saveButton.click();
+        await new Promise(resolve => setTimeout(resolve, 20));
+    });
+
+    check('没有进度时点存档不会报错', () => {
+        const saveButton = registry.get('n2c-save-now');
+        saveButton.click();
+    });
+
+    // ---- 存档往返：直接复用 index.js 已经加载过的 persist 模块，验证 IndexedDB 链路 ----
+    const persistCacheKey = path.join(root, 'src/persist.js');
+    const persistModule = cache.get(persistCacheKey);
+    if (!persistModule) throw new Error('persist.js 没有被加载，检查 index.js 的导入');
+    const persist = persistModule.namespace;
+
+    await check('存档写读往返：中文、分卷正文、角色档案都不丢', async () => {
+        const snapshot = {
+            novelTitle: '试炼之书',
+            rawText: '第一章 起点\n' + '剑光掠过山巅。'.repeat(500),
+            volumes: [{ index: 0, label: '第 1 卷', title: '第一章 起点', chars: 4000, body: '第一章 起点\n正文' }],
+            volumeIndex: 0,
+            characters: [{ name: '沈青梧', aliases: ['青梧'], tier: '主角', selected: true }],
+            profiles: [{ name: '沈青梧', tier: '主角', cardV3: { spec: 'chara_card_v3', data: { name: '沈青梧' } } }],
+            entries: [{ comment: '青云宗', keys: ['青云宗'], content: '东域第一剑宗。' }],
+            logLines: [{ stamp: '12:00:00', message: '测试', level: 'info' }],
+        };
+
+        const saved = await persist.saveSnapshot({ name: '往返测试', state: snapshot });
+        if (!saved.id) throw new Error('没有返回存档 id');
+        if (!(saved.bytes > 0)) throw new Error('字节数为 0');
+
+        const list = await persist.listSnapshots();
+        if (!list.some(item => item.id === saved.id)) throw new Error('存档没有出现在列表里');
+        // 摘要里绝不能带出 state 本体，否则一次能读出几 MB
+        for (const item of list) {
+            if ('state' in item) throw new Error('列表摘要里带出了 state 字段');
+        }
+
+        const loaded = await persist.loadSnapshot(saved.id);
+        if (!loaded) throw new Error('读不到存档');
+        const restored = loaded.state;
+        if (restored.novelTitle !== snapshot.novelTitle) throw new Error('作品名丢失');
+        if (restored.rawText.length !== snapshot.rawText.length) throw new Error('正文长度变了');
+        if (restored.rawText !== snapshot.rawText) throw new Error('正文内容变了');
+        if (restored.characters[0].aliases[0] !== '青梧') throw new Error('别名丢失');
+        if (restored.characters[0].tier !== '主角') throw new Error('分级丢失');
+        if (restored.profiles[0].cardV3.data.name !== '沈青梧') throw new Error('卡片数据丢失');
+        if (restored.entries[0].content !== '东域第一剑宗。') throw new Error('世界书条目丢失');
+    });
+
+    await check('同名存档会覆盖而不是堆积', async () => {
+        const before = (await persist.listSnapshots()).length;
+        const first = await persist.saveSnapshot({ name: '覆盖测试', state: { novelTitle: 'v1' } });
+        await persist.saveSnapshot({ id: first.id, name: '覆盖测试', state: { novelTitle: 'v2' } });
+        const after = await persist.listSnapshots();
+        if (after.length !== before + 1) throw new Error(`存档数量不对：${before} -> ${after.length}`);
+        const reloaded = await persist.loadSnapshot(first.id);
+        if (reloaded.state.novelTitle !== 'v2') throw new Error('覆盖没有生效');
+    });
+
+    await check('删除存档后读不到', async () => {
+        const saved = await persist.saveSnapshot({ name: '待删除', state: { novelTitle: 'x' } });
+        await persist.deleteSnapshot(saved.id);
+        const loaded = await persist.loadSnapshot(saved.id);
+        if (loaded !== null) throw new Error('删除后仍能读到');
+    });
+
+    await check('latestSnapshot 返回最近一份', async () => {
+        await persist.saveSnapshot({ name: '较旧', state: { novelTitle: 'old' } });
+        await new Promise(resolve => setTimeout(resolve, 5));
+        const newest = await persist.saveSnapshot({ name: '较新', state: { novelTitle: 'new' } });
+        const latest = await persist.latestSnapshot();
+        if (!latest || latest.id !== newest.id) throw new Error('返回的不是最近一份');
+    });
+
+    await check('formatBytes / formatTime 输出可读', () => {
+        if (persist.formatBytes(512) !== '512 B') throw new Error('B 档格式化不对');
+        if (!persist.formatBytes(2048).includes('KB')) throw new Error('KB 档格式化不对');
+        if (!persist.formatBytes(5 * 1024 * 1024).includes('MB')) throw new Error('MB 档格式化不对');
+        if (typeof persist.formatTime(Date.now()) !== 'string') throw new Error('时间格式化不对');
     });
 
     console.log(`\n结果：${passed} 通过，${failed} 失败\n`);

@@ -63,6 +63,16 @@ import {
     estimateVolumeCost,
 } from './src/splits.js';
 
+import {
+    saveSnapshot,
+    listSnapshots,
+    loadSnapshot,
+    deleteSnapshot,
+    latestSnapshot,
+    formatBytes,
+    formatTime,
+} from './src/persist.js';
+
 const MODULE_NAME = 'novel_to_card';
 
 const DEFAULT_SETTINGS = Object.freeze({
@@ -103,6 +113,15 @@ const DEFAULT_SETTINGS = Object.freeze({
     maxProtagonists: 3,
     maxSupporting: 6,
     briefSupporting: true,
+    // 独立开关与窗口
+    pluginEnabled: true,
+    useFloatingWindow: false,
+    winX: null,
+    winY: null,
+    winW: 420,
+    winH: 620,
+    // 中途保存
+    autoSave: true,
 });
 
 const state = {
@@ -121,6 +140,14 @@ const state = {
     volumes: [],
     volumeIndex: 0,
     volumeWarnings: [],
+    // 独立窗口
+    panelBody: null,
+    winEl: null,
+    dragging: null,
+    // 中途保存
+    lastSaveId: null,
+    lastSaveAt: 0,
+    snapshotList: [],
 };
 
 // ================================================================
@@ -207,12 +234,22 @@ function setRunning(running) {
 function renderPanelHtml() {
     const s = getSettings();
     return `
-<div id="n2c-panel" class="inline-drawer">
-  <div class="inline-drawer-toggle inline-drawer-header">
+<div id="n2c-panel" class="inline-drawer${s.pluginEnabled ? '' : ' n2c-off'}">
+  <div class="inline-drawer-toggle inline-drawer-header n2c-head">
     <b>小说转角色卡</b>
-    <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+    <div class="n2c-head-actions">
+      <label class="checkbox_label n2c-master" title="关闭后扩展不响应任何操作，面板置灰">
+        <input type="checkbox" id="n2c-plugin-enabled" ${s.pluginEnabled ? 'checked' : ''}>
+        <span>启用</span>
+      </label>
+      <div class="menu_button n2c-small" id="n2c-open-window" title="在独立浮动窗口中打开">
+        <i class="fa-solid fa-up-right-and-down-left-from-center"></i> 独立窗口
+      </div>
+      <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+    </div>
   </div>
   <div class="inline-drawer-content">
+    <div id="n2c-body" class="n2c-body">
 
     <div class="n2c-section">
       <div class="n2c-label">1. 小说文本</div>
@@ -399,12 +436,33 @@ function renderPanelHtml() {
 
     <div class="n2c-section">
       <div class="n2c-row n2c-log-head">
+        <div class="n2c-label">存档与进度</div>
+        <div class="menu_button n2c-small" id="n2c-save-now"><i class="fa-solid fa-floppy-disk"></i> 立即存档</div>
+      </div>
+      <div class="n2c-row">
+        <input type="text" id="n2c-save-name" class="text_pole n2c-grow" placeholder="存档名（留空自动取名）">
+        <label class="checkbox_label"><input type="checkbox" id="n2c-autosave" ${s.autoSave ? 'checked' : ''}><span>自动存档</span></label>
+        <div class="menu_button n2c-small" id="n2c-refresh-saves"><i class="fa-solid fa-rotate"></i> 刷新</div>
+      </div>
+      <div class="n2c-hint" id="n2c-save-info">进度存在浏览器 IndexedDB 里，重开酒馆后可从这里恢复。</div>
+      <div id="n2c-save-list" class="n2c-save-list"></div>
+    </div>
+
+    <div class="n2c-section">
+      <div class="n2c-row n2c-log-head">
         <div class="n2c-label">运行日志</div>
         <div class="menu_button n2c-small" id="n2c-clear-log">清空</div>
       </div>
       <div id="n2c-log" class="n2c-log"></div>
     </div>
 
+    </div>
+    <div id="n2c-drawer-slot" class="n2c-drawer-slot">
+      <div class="n2c-hint">
+        面板已在独立窗口中打开。
+        <span class="menu_button n2c-small" id="n2c-slot-return">收回此处</span>
+      </div>
+    </div>
   </div>
 </div>`;
 }
@@ -418,10 +476,250 @@ function mountPanel() {
     if ($id('n2c-panel')) return true;
 
     host.insertAdjacentHTML('beforeend', renderPanelHtml());
+    state.panelBody = $id('n2c-body');
     bindPanelEvents();
+    bindPanelHeaderEvents();
+    mountTopbarDrawer();
+    applyEnabledState();
     renderCharacterList();
     updateTextInfo();
+    renderSaveList().catch(() => {});
+    maybeOfferRestore();
+
+    // 独立窗口是常驻的：上次开了窗口就照原位置恢复
+    const settings = getSettings();
+    if (settings.useFloatingWindow) {
+        openFloatingWindow();
+    } else {
+        setupDrawerSlot();
+    }
     return true;
+}
+
+/** 抽屉内留一个槽位：主体被搬到独立窗口后，这里显示一句说明和回来的按钮 */
+function setupDrawerSlot() {
+    const slot = $id('n2c-drawer-slot');
+    if (!slot) return;
+    if ($id('n2c-slot-return')) {
+        // 已经绑过就不再重复绑定
+        if (!slot._n2cBound) {
+            slot._n2cBound = true;
+            $id('n2c-slot-return')?.addEventListener('click', () => {
+                if (state.winEl) closeFloatingWindow();
+                else setupDrawerSlot();
+            });
+        }
+    }
+    syncDrawerSlotVisibility();
+}
+
+/** 主体在抽屉里时隐藏提示，搬走了才显示 */
+function syncDrawerSlotVisibility() {
+    const slot = $id('n2c-drawer-slot');
+    if (!slot) return;
+    const body = state.panelBody || $id('n2c-body');
+    const bodyInDrawer = !!(body && slot.parentNode && body.parentNode === slot.parentNode);
+    slot.classList.toggle('n2c-slot-hidden', bodyInDrawer);
+}
+
+/** 把面板主体在「扩展设置里」和「独立窗口」之间搬移 */
+function movePanelBody(target) {
+    const body = state.panelBody || $id('n2c-body');
+    if (!body || !target) return;
+    state.panelBody = body;
+    if (body.parentNode === target) return;
+    target.appendChild(body);
+}
+
+function exitFloatingWindow() {
+    const s = getSettings();
+    s.useFloatingWindow = false;
+    putSettings();
+    if (state.winEl) {
+        state.winEl.remove();
+        state.winEl = null;
+    }
+    const slot = $id('n2c-drawer-slot');
+    if (slot) movePanelBody(slot);
+    syncDrawerSlotVisibility();
+    log('已退回扩展设置面板');
+}
+
+function openFloatingWindow() {
+    const s = getSettings();
+    s.useFloatingWindow = true;
+    putSettings();
+    closeFloatingWindow({ keepState: true });
+
+    const win = document.createElement('div');
+    win.id = 'n2c-window';
+    win.className = 'n2c-window';
+    win.insertAdjacentHTML('beforeend', `
+      <div class="n2c-window-head" id="n2c-window-head">
+        <span class="n2c-window-title"><i class="fa-solid fa-id-card"></i> 小说转角色卡</span>
+        <div class="n2c-window-actions">
+          <div class="n2c-win-btn" id="n2c-window-dock" title="收回扩展设置面板"><i class="fa-solid fa-down-left-and-up-right-to-center"></i></div>
+          <div class="n2c-win-btn" id="n2c-window-close" title="关闭窗口"><i class="fa-solid fa-xmark"></i></div>
+        </div>
+      </div>
+      <div class="n2c-window-body" id="n2c-window-body"></div>`);
+
+    document.body.appendChild(win);
+    state.winEl = win;
+
+    const viewportWidth = window.innerWidth || 1280;
+    const viewportHeight = window.innerHeight || 800;
+    const width = Math.max(320, Math.min(Number(s.winW) || 420, viewportWidth - 40));
+    const height = Math.max(320, Math.min(Number(s.winH) || 620, viewportHeight - 40));
+    const left = Number.isFinite(s.winX) && s.winX !== null
+        ? Math.max(0, Math.min(s.winX, viewportWidth - width))
+        : Math.max(0, viewportWidth - width - 24);
+    const top = Number.isFinite(s.winY) && s.winY !== null
+        ? Math.max(0, Math.min(s.winY, viewportHeight - height))
+        : 64;
+
+    // 移动端/桌面端都用原生 style，避免依赖 jQuery 的 css() 语义
+    win.style.left = `${left}px`;
+    win.style.top = `${top}px`;
+    win.style.width = `${width}px`;
+    win.style.height = `${height}px`;
+
+    movePanelBody($id('n2c-window-body'));
+    syncDrawerSlotVisibility();
+    win.querySelector('#n2c-window-dock')?.addEventListener('click', () => exitFloatingWindow());
+    win.querySelector('#n2c-window-close')?.addEventListener('click', () => closeFloatingWindow());
+    bindWindowDrag(win);
+}
+
+function closeFloatingWindow({ keepState = false } = {}) {
+    if (state.winEl) {
+        state.winEl.remove();
+        state.winEl = null;
+    }
+    if (!keepState) {
+        const s = getSettings();
+        s.useFloatingWindow = false;
+        putSettings();
+        const slot = $id('n2c-drawer-slot');
+        if (slot) movePanelBody(slot);
+        syncDrawerSlotVisibility();
+        log('已关闭独立窗口');
+    }
+}
+
+function bindWindowDrag(win) {
+    const head = win.querySelector('#n2c-window-head');
+    if (!head) return;
+
+    const onDown = event => {
+        if (event.target.closest('.n2c-win-btn')) return;
+        const rect = win.getBoundingClientRect
+            ? win.getBoundingClientRect()
+            : { left: parseFloat(win.style.left) || 0, top: parseFloat(win.style.top) || 0 };
+        state.dragging = {
+            offsetX: (event.clientX || 0) - rect.left,
+            offsetY: (event.clientY || 0) - rect.top,
+        };
+        document.addEventListener?.('mousemove', onMove);
+        document.addEventListener?.('mouseup', onUp);
+        event.preventDefault?.();
+    };
+
+    const onMove = event => {
+        if (!state.dragging) return;
+        const width = parseFloat(win.style.width) || 420;
+        const height = parseFloat(win.style.height) || 620;
+        const maxX = Math.max(0, (window.innerWidth || 1280) - width);
+        const maxY = Math.max(0, (window.innerHeight || 800) - height);
+        const left = Math.max(0, Math.min((event.clientX || 0) - state.dragging.offsetX, maxX));
+        const top = Math.max(0, Math.min((event.clientY || 0) - state.dragging.offsetY, maxY));
+        win.style.left = `${left}px`;
+        win.style.top = `${top}px`;
+    };
+
+    const onUp = () => {
+        if (!state.dragging) return;
+        state.dragging = null;
+        document.removeEventListener?.('mousemove', onMove);
+        document.removeEventListener?.('mouseup', onUp);
+        const s = getSettings();
+        s.winX = parseFloat(win.style.left) || 0;
+        s.winY = parseFloat(win.style.top) || 0;
+        putSettings();
+    };
+
+    head.addEventListener('mousedown', onDown);
+}
+
+/** 在顶栏加一个入口，方便用独立窗口而不是钻进扩展设置里找 */
+function mountTopbarDrawer() {
+    if ($id('n2c-drawer-icon')) return;
+    const anchor = document.querySelector('.drawer-icon.fa-solid.fa-cubes');
+    const drawer = anchor?.closest?.('.drawer');
+    if (!drawer || !drawer.parentNode) return;
+
+    const wrapper = document.createElement('div');
+    wrapper.id = 'n2c-drawer';
+    wrapper.className = 'drawer';
+    wrapper.innerHTML = `
+      <div class="drawer-toggle">
+        <div id="n2c-drawer-icon" class="drawer-icon fa-solid fa-id-card fa-fw closedIcon interactable"
+             title="小说转角色卡：把小说正文提取成角色卡" tabindex="0"></div>
+      </div>`;
+
+    drawer.parentNode.insertBefore(wrapper, drawer);
+    wrapper.querySelector('#n2c-drawer-icon')?.addEventListener('click', () => {
+        if (!getSettings().pluginEnabled) {
+            toast('warn', '插件已关闭，请先在扩展设置里启用');
+            return;
+        }
+        if (state.winEl) closeFloatingWindow();
+        else openFloatingWindow();
+    });
+}
+
+/** 主开关：关掉后面板置灰、按钮不响应 */
+function applyEnabledState() {
+    const s = getSettings();
+    const panel = $id('n2c-panel');
+    if (panel) panel.classList.toggle('n2c-off', !s.pluginEnabled);
+    const drawerIcon = $id('n2c-drawer-icon');
+    if (drawerIcon) {
+        drawerIcon.classList.toggle('n2c-icon-off', !s.pluginEnabled);
+        drawerIcon.title = s.pluginEnabled
+            ? '小说转角色卡：把小说正文提取成角色卡'
+            : '小说转角色卡（已关闭）';
+    }
+    if (!s.pluginEnabled && state.winEl) closeFloatingWindow();
+}
+
+function isPluginEnabled() {
+    return getSettings().pluginEnabled !== false;
+}
+
+/** 所有动作入口统一挡一道，避免关掉插件后仍被旧按钮触发 */
+function requireEnabled() {
+    if (!isPluginEnabled()) {
+        toast('warn', '插件已关闭，请先在面板顶部勾选「启用」');
+        return false;
+    }
+    return true;
+}
+
+function bindPanelHeaderEvents() {
+    $id('n2c-plugin-enabled')?.addEventListener('change', event => {
+        const s = getSettings();
+        s.pluginEnabled = event.target.checked;
+        putSettings();
+        applyEnabledState();
+        log(s.pluginEnabled ? '插件已启用' : '插件已关闭');
+        if (s.pluginEnabled) renderSaveList().catch(() => {});
+    });
+
+    $id('n2c-open-window')?.addEventListener('click', () => {
+        if (!requireEnabled()) return;
+        openFloatingWindow();
+    });
 }
 
 // ================================================================
@@ -654,6 +952,14 @@ function bindPanelEvents() {
 
     $id('n2c-classify')?.addEventListener('click', () => runClassify());
 
+    // ---- 存档
+    $id('n2c-save-now')?.addEventListener('click', () => saveProgress());
+    $id('n2c-refresh-saves')?.addEventListener('click', () => renderSaveList());
+    $id('n2c-autosave')?.addEventListener('change', event => {
+        s.autoSave = event.target.checked;
+        putSettings();
+    });
+
     syncApiConfigVisibility();
 
     // ---- 分卷相关
@@ -746,6 +1052,7 @@ function activeVolumeLabel() {
 }
 
 function previewSplit() {
+    if (!requireEnabled()) return;
     const s = getSettings();
     const text = String(state.rawText || '');
     if (!text.trim()) {
@@ -794,6 +1101,7 @@ function previewSplit() {
     renderVolumeList();
     updateTextInfo();
     toast('success', `已分成 ${result.volumes.length} 卷`);
+    autoSaveCheckpoint('分卷完成').catch(() => {});
 }
 
 function renderVolumeList() {
@@ -1004,6 +1312,225 @@ function downloadProfilePng(profile) {
 }
 
 // ================================================================
+// 中途保存 / 恢复
+// ================================================================
+
+/**
+ * 抓取当前进度快照。
+ * 注意不存 `_pngBytes`：那是二进制大对象，塞进 JSON 会让存档膨胀十倍以上，
+ * 而且重开酒馆后大概率已经导入过角色列表，没必要留着。
+ */
+function snapshotState() {
+    return {
+        novelTitle: state.novelTitle,
+        rawText: state.rawText,
+        volumes: state.volumes.map(volume => ({
+            index: volume.index,
+            label: volume.label,
+            title: volume.title,
+            chars: volume.chars,
+            start: volume.start,
+            end: volume.end,
+            body: volume.body,
+            _cardCount: volume._cardCount,
+            _done: volume._done,
+        })),
+        volumeIndex: state.volumeIndex,
+        volumeWarnings: state.volumeWarnings,
+        chunkChars: state._chunkChars || getSettings().chunkChars,
+        characters: state.characters.map(character => ({
+            name: character.name,
+            aliases: character.aliases,
+            role: character.role,
+            screen_time: character.screen_time,
+            chunkIndexes: character.chunkIndexes,
+            score: character.score,
+            selected: character.selected,
+            tier: character.tier,
+            tierReason: character.tierReason,
+            profile: character.profile || null,
+        })),
+        profiles: state.profiles.map(profile => ({
+            name: profile.name,
+            role: profile.role,
+            tier: profile.tier,
+            cardV2: profile.cardV2,
+            cardV3: profile.cardV3,
+            _summary: profile._summary,
+        })),
+        entries: state.entries,
+        logLines: state.logLines.slice(-120),
+        savedAt: Date.now(),
+    };
+}
+
+function clearChunkCache() {
+    state.chunks = [];
+    state._chunkSource = '';
+}
+
+/** 恢复快照；分卷正文会重新参与切段，所以只清缓存不丢数据 */
+function applySnapshot(snapshot) {
+    state.novelTitle = snapshot.novelTitle || '';
+    state.rawText = snapshot.rawText || '';
+    state.volumes = Array.isArray(snapshot.volumes) ? snapshot.volumes : [];
+    state.volumeIndex = Number(snapshot.volumeIndex) || 0;
+    state.volumeWarnings = Array.isArray(snapshot.volumeWarnings) ? snapshot.volumeWarnings : [];
+    state.characters = Array.isArray(snapshot.characters) ? snapshot.characters : [];
+    state.profiles = Array.isArray(snapshot.profiles) ? snapshot.profiles : [];
+    state.entries = Array.isArray(snapshot.entries) ? snapshot.entries : [];
+    clearChunkCache();
+    state._chunkChars = snapshot.chunkChars || null;
+
+    const textarea = $id('n2c-text');
+    if (textarea) textarea.value = state.rawText.length > 200_000 ? state.rawText.slice(0, 200_000) : state.rawText;
+    const titleInput = $id('n2c-title');
+    if (titleInput) titleInput.value = state.novelTitle;
+
+    renderCharacterList();
+    renderResults();
+    renderVolumeList();
+    updateTextInfo();
+
+    const box = $id('n2c-log');
+    if (box) box.innerHTML = '';
+    for (const line of snapshot.logLines || []) {
+        state.logLines.push(line);
+        const element = document.createElement('div');
+        element.className = `n2c-log-line n2c-log-${line.level || 'info'}`;
+        element.insertAdjacentHTML('beforeend',
+            `<span class="n2c-log-time">${escapeHtml(line.stamp)}</span>`
+            + `<span class="n2c-log-text">${escapeHtml(line.message)}</span>`);
+        box?.appendChild(element);
+    }
+}
+
+async function saveProgress({ silent = false } = {}) {
+    if (!requireEnabled()) return;
+    if (!state.rawText && !state.characters.length && !state.profiles.length) {
+        if (!silent) toast('warn', '还没有任何进度可以保存');
+        return;
+    }
+
+    const nameInput = $id('n2c-save-name');
+    const typed = nameInput?.value?.trim();
+    const autoName = state.novelTitle ? `${state.novelTitle}` : '未命名作品';
+    const volumeLabel = activeVolumeLabel();
+    const name = typed || `${autoName}${volumeLabel ? ` ${volumeLabel}` : ''}`;
+
+    try {
+        const result = await saveSnapshot({
+            id: state.lastSaveId || undefined,
+            name,
+            state: snapshotState(),
+        });
+        state.lastSaveId = result.id;
+        state.lastSaveAt = result.savedAt;
+        updateSaveInfo(`已存档：${name} · ${formatBytes(result.bytes)} · ${formatTime(result.savedAt)}`);
+        if (!silent) {
+            toast('success', `进度已保存（${formatBytes(result.bytes)}）`);
+            log(`已存档「${name}」：${formatBytes(result.bytes)}`);
+        }
+        await renderSaveList();
+    } catch (error) {
+        updateSaveInfo(`存档失败：${error.message}`);
+        log(`存档失败：${error.message}`, 'error');
+        if (!silent) toast('error', `存档失败：${error.message}`);
+    }
+}
+
+/** 关键节点自动存档：只在开启时生效，失败不打扰用户 */
+async function autoSaveCheckpoint(reason) {
+    if (!getSettings().autoSave) return;
+    await saveProgress({ silent: true });
+    log(`已在「${reason}」自动存档`);
+}
+
+function updateSaveInfo(text) {
+    const info = $id('n2c-save-info');
+    if (info) info.textContent = text;
+}
+
+async function renderSaveList() {
+    const host = $id('n2c-save-list');
+    if (!host) return;
+
+    let list = [];
+    try {
+        list = await listSnapshots();
+    } catch (error) {
+        host.innerHTML = `<div class="n2c-hint">读取存档列表失败：${escapeHtml(error.message)}</div>`;
+        return;
+    }
+    state.snapshotList = list;
+
+    if (!list.length) {
+        host.innerHTML = '<div class="n2c-hint">还没有存档。</div>';
+        return;
+    }
+
+    host.innerHTML = list.slice(0, 8).map(item => `
+<div class="n2c-save-row" data-id="${escapeHtml(item.id)}">
+  <div class="n2c-save-main">
+    <div class="n2c-save-name">${escapeHtml(item.name)}</div>
+    <div class="n2c-save-meta">${formatTime(item.savedAt)} · ${formatBytes(item.bytes)}</div>
+  </div>
+  <div class="menu_button n2c-small n2c-save-load"><i class="fa-solid fa-rotate-left"></i> 恢复</div>
+  <div class="menu_button n2c-small n2c-save-del"><i class="fa-solid fa-trash-can"></i></div>
+</div>`).join('');
+
+    host.querySelectorAll('.n2c-save-row').forEach(row => {
+        const id = row.dataset.id;
+        row.querySelector('.n2c-save-load')?.addEventListener('click', () => restoreSnapshot(id));
+        row.querySelector('.n2c-save-del')?.addEventListener('click', async () => {
+            try {
+                await deleteSnapshot(id);
+                log('已删除一份存档');
+                await renderSaveList();
+            } catch (error) {
+                toast('error', `删除失败：${error.message}`);
+            }
+        });
+    });
+}
+
+async function restoreSnapshot(id) {
+    if (!requireEnabled()) return;
+    if (state.running) {
+        toast('warn', '正在运行中，先中止再恢复');
+        return;
+    }
+    try {
+        const record = await loadSnapshot(id);
+        if (!record) {
+            toast('error', '存档不存在或已被删除');
+            return;
+        }
+        applySnapshot(record.state);
+        state.lastSaveId = record.id;
+        log(`已恢复存档「${record.name}」（${formatTime(record.savedAt)}）`);
+        toast('success', `已恢复「${record.name}」`);
+        updateSaveInfo(`当前进度来自存档：${record.name}`);
+    } catch (error) {
+        log(`恢复失败：${error.message}`, 'error');
+        toast('error', `恢复失败：${error.message}`);
+    }
+}
+
+/** 启动时如果发现上次有存档，提示一句而不是自动覆盖当前状态 */
+async function maybeOfferRestore() {
+    if (!isPluginEnabled()) return;
+    try {
+        const latest = await latestSnapshot();
+        if (!latest) return;
+        log(`发现上次的存档「${latest.name}」（${formatTime(latest.savedAt)}），可在「存档与进度」里恢复`);
+        updateSaveInfo(`上次存档：${latest.name} · ${formatTime(latest.savedAt)}`);
+    } catch {
+        // 读不到就安静跳过，别打扰用户
+    }
+}
+
+// ================================================================
 // 环境检查
 // ================================================================
 
@@ -1085,6 +1612,7 @@ async function testApiConnection() {
 /** 角色分级：调模型判定三档，然后按配额筛选 */
 async function runClassify() {
     if (state.running) return;
+    if (!requireEnabled()) return;
     if (!state.characters.length) {
         toast('warn', '请先点「分析人物」得到候选角色');
         return;
@@ -1194,6 +1722,7 @@ function updateTierSummary() {
 
 async function runAnalyze() {
     if (state.running) return;
+    if (!requireEnabled()) return;
     const settings = getSettings();
     const text = activeText().trim();
     if (!text) {
@@ -1271,6 +1800,7 @@ async function runAnalyze() {
         renderCharacterList();
         setProgress(100, `识别完成，共 ${state.characters.length} 人`);
         toast('success', `识别到 ${state.characters.length} 个角色，可以生成角色卡了`);
+        await autoSaveCheckpoint('人物分析完成');
     } catch (error) {
         log(error.message, 'error');
         setProgress(0, '分析失败');
@@ -1295,6 +1825,7 @@ async function ensureChunks(text) {
 
 async function runGenerate() {
     if (state.running) return;
+    if (!requireEnabled()) return;
     const settings = getSettings();
     const text = activeText().trim();
     if (!text) {
@@ -1403,6 +1934,7 @@ async function runGenerate() {
         if (settings.withWorldBook && settings.saveWorldBookFile && state.entries.length) {
             downloadWorldFile();
         }
+        await autoSaveCheckpoint('角色卡生成完成');
     } catch (error) {
         log(error.message, error.level === 'error' ? 'error' : 'warn');
         toast('error', error.message);
@@ -1415,6 +1947,7 @@ async function runGenerate() {
 
 async function runWorldOnly() {
     if (state.running) return;
+    if (!requireEnabled()) return;
     const text = activeText().trim();
     if (!text) {
         toast('warn', '请先载入或粘贴小说文本');
