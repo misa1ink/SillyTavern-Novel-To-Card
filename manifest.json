@@ -5,8 +5,8 @@
   "optional": [],
   "js": "index.js",
   "css": "style.css",
-  "author": "DSH",
-  "version": "1.0.0",
+  "author": "misa1ink",
+  "version": "1.2.0",
   "homePage": "https://github.com/misa1ink/SillyTavern-Novel-To-Card",
   "auto_update": false
 }
