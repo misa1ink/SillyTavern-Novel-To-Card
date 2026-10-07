@@ -707,5 +707,225 @@ test('成本预估与卷字数一致', () => {
     assert.equal(splits.estimateVolumeCost(1, 6000).scanRequests, 1, '极短文本也至少 1 次请求');
 });
 
+console.log('\n[7] 独立 API 与角色分级');
+
+test('接口地址被规范成 OpenAI 兼容 base', () => {
+    assert.equal(ai.normalizeApiBase('https://api.deepseek.com'), 'https://api.deepseek.com/v1');
+    assert.equal(ai.normalizeApiBase('https://api.deepseek.com/'), 'https://api.deepseek.com/v1');
+    assert.equal(ai.normalizeApiBase('https://api.deepseek.com/v1'), 'https://api.deepseek.com/v1');
+    assert.equal(ai.normalizeApiBase('https://api.deepseek.com/beta'), 'https://api.deepseek.com/beta');
+    assert.equal(ai.normalizeApiBase('https://x.com/v1/chat/completions'), 'https://x.com/v1');
+    assert.equal(ai.normalizeApiBase('https://x.com/v1/'), 'https://x.com/v1');
+    assert.equal(ai.normalizeApiBase(''), '');
+    assert.equal(ai.normalizeApiBase('   '), '');
+});
+
+test('档位写法被归一到三档', () => {
+    assert.equal(ai.normalizeTier('主角'), '主角');
+    assert.equal(ai.normalizeTier('main'), '主角');
+    assert.equal(ai.normalizeTier('protagonist'), '主角');
+    assert.equal(ai.normalizeTier('主角 '), '主角');
+    assert.equal(ai.normalizeTier(' 主角'), '主角');
+    assert.equal(ai.normalizeTier('主角（视角人物）'), '主角');
+    assert.equal(ai.normalizeTier('主要配角'), '主要配角');
+    assert.equal(ai.normalizeTier('重要配角'), '主要配角');
+    assert.equal(ai.normalizeTier('配角'), '主要配角');
+    assert.equal(ai.normalizeTier('supporting'), '主要配角');
+    assert.equal(ai.normalizeTier('次要配角'), '次要配角');
+    assert.equal(ai.normalizeTier('龙套'), '次要配角');
+    assert.equal(ai.normalizeTier('minor'), '次要配角');
+    assert.equal(ai.normalizeTier('乱写的'), '主要配角', '认不出来时应保守处理，不误降级');
+    assert.equal(ai.normalizeTier(''), '主要配角');
+});
+
+test('含"配角"的写法绝不能被判成主角（曾出现回归）', () => {
+    for (const text of ['主要配角', '重要配角', '配角', '次要配角', '主要配角（女主闺蜜）', 'Supporting Character']) {
+        assert.notEqual(ai.normalizeTier(text), '主角', `「${text}」被误判成主角`);
+    }
+    // 反向：真正的主角写法仍要判成主角，包括含「配角」两个字但其实是主角的写法
+    for (const text of ['主角', '主角（视角人物）', '第一主角', '男主', '女主', 'protagonist']) {
+        assert.equal(ai.normalizeTier(text), '主角', `「${text}」应判为主角`);
+    }
+    // 「次要配角」必须降级，不能被"配角"规则吃掉
+    assert.equal(ai.normalizeTier('次要配角'), '次要配角');
+    assert.equal(ai.normalizeTier('配角（龙套）'), '次要配角', '带次要注释的应按次要处理');
+});
+
+test('isBriefTier 只对次要配角为真', () => {
+    assert.equal(ai.isBriefTier('次要配角'), true);
+    assert.equal(ai.isBriefTier('brief'), true);
+    assert.equal(ai.isBriefTier('主角'), false);
+    assert.equal(ai.isBriefTier('主要配角'), false);
+    assert.equal(ai.isBriefTier(undefined), false);
+});
+
+test('选择酒馆通道时返回可用客户端（注入假 generateRaw 验证契约）', async () => {
+    const calls = [];
+    const fakeContext = {
+        generateRaw: async (options) => {
+            calls.push(options);
+            return '  假模型回复  ';
+        },
+    };
+    const client = ai.createConfiguredModelClient(fakeContext, { client: 'tavern' });
+    const text = await client([{ role: 'user', content: '你好' }], { maxTokens: 128 });
+    assert.equal(text, '假模型回复');
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].prompt, [{ role: 'user', content: '你好' }]);
+    assert.equal(calls[0].responseLength, 128);
+});
+
+test('酒馆通道在缺 generateRaw 时给出明确报错', () => {
+    assert.throws(() => ai.createConfiguredModelClient({}, { client: 'tavern' }), /generateRaw/);
+});
+
+test('独立 API 缺地址或模型时立刻报错，且不做无意义重试', async () => {
+    const client = ai.createConfiguredModelClient({}, { client: 'custom', custom: { url: '', model: '' } });
+    await assert.rejects(() => client([{ role: 'user', content: 'x' }]), /未填写接口地址/);
+
+    const client2 = ai.createConfiguredModelClient({}, { client: 'custom', custom: { url: 'https://a.com/v1', model: '' } });
+    await assert.rejects(() => client2([{ role: 'user', content: 'x' }]), /未填写模型名/);
+});
+
+test('独立 API 请求体符合酒馆后端契约', async () => {
+    const originalFetch = globalThis.fetch;
+    let captured = null;
+    globalThis.fetch = async (url, init) => {
+        captured = { url, body: JSON.parse(init.body), headers: init.headers };
+        return {
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify({ choices: [{ message: { content: '可用' } }] }),
+        };
+    };
+    try {
+        const client = ai.createConfiguredModelClient({ getRequestHeaders: () => ({ 'X-CSRF-Token': 't' }) }, {
+            client: 'custom',
+            custom: { url: 'https://api.test.com', key: 'sk-abc', model: 'cheap-model', temperature: 0.3, top_p: 0.9 },
+        });
+        const text = await client([{ role: 'user', content: 'hi' }], { maxTokens: 64 });
+        assert.equal(text, '可用');
+        assert.equal(captured.url, '/api/backends/chat-completions/generate');
+        assert.equal(captured.body.chat_completion_source, 'openai');
+        assert.equal(captured.body.reverse_proxy, 'https://api.test.com/v1');
+        assert.equal(captured.body.proxy_password, 'sk-abc');
+        assert.equal(captured.body.model, 'cheap-model');
+        assert.equal(captured.body.max_tokens, 64);
+        assert.equal(captured.body.temperature, 0.3);
+        assert.equal(captured.body.top_p, 0.9);
+        assert.equal(captured.body.stream, false);
+        assert.equal(captured.headers['X-CSRF-Token'], 't');
+        assert.equal(captured.headers['Content-Type'], 'application/json');
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test('独立 API 遇到上游错误会带出状态码与响应体', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({
+        ok: false,
+        status: 401,
+        text: async () => '{"error":{"message":"Invalid API key"}}',
+    });
+    try {
+        const client = ai.createConfiguredModelClient({}, {
+            client: 'custom',
+            custom: { url: 'https://api.test.com', key: 'bad', model: 'm' },
+        });
+        await assert.rejects(() => client([{ role: 'user', content: 'hi' }]), /401.*Invalid API key/s);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test('独立 API 收到 SSE 响应也能取出文本（中转站常见）', async () => {
+    const originalFetch = globalThis.fetch;
+    const sse = [
+        'data: {"choices":[{"delta":{"content":"你"}}]}',
+        '',
+        'data: {"choices":[{"delta":{"content":"好"}}]}',
+        '',
+        'data: [DONE]',
+        '',
+    ].join('\n');
+    globalThis.fetch = async () => ({ ok: true, status: 200, text: async () => sse });
+    try {
+        const client = ai.createConfiguredModelClient({}, {
+            client: 'custom',
+            custom: { url: 'https://api.test.com/v1', model: 'm' },
+        });
+        assert.equal(await client([{ role: 'user', content: 'hi' }]), '你好');
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test('testCustomApi 连通性探测返回耗时与样例', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ choices: [{ message: { content: '可用' } }] }),
+    });
+    try {
+        const result = await ai.testCustomApi({
+            apiConfig: { url: 'https://api.test.com/v1', model: 'm' },
+            getRequestHeaders: () => ({}),
+        });
+        assert.equal(result.ok, true);
+        assert.equal(result.sample, '可用');
+        assert.ok(typeof result.elapsedMs === 'number');
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test('分级提示词包含人员名单与分档规则', () => {
+    const messages = prompts.buildClassifyPrompt({
+        names: ['沈青梧', '苏晚'],
+        evidence: '【第 1 段节选】\n沈青梧拔剑。',
+        novelTitle: '试炼',
+    });
+    const user = messages[messages.length - 1].content;
+    assert.ok(user.includes('沈青梧'));
+    assert.ok(user.includes('苏晚'));
+    assert.ok(user.includes('主角'));
+    assert.ok(user.includes('主要配角'));
+    assert.ok(user.includes('次要配角'));
+    assert.ok(user.includes('只输出 JSON 数组'));
+    assert.ok(user.includes('沈青梧拔剑'));
+});
+
+test('次要配角的档案提示词用精简 schema，主角用完整 schema', () => {
+    const brief = prompts.buildProfilePrompt({
+        name: '路人甲', evidence: 'x', novelTitle: 't', tier: '次要配角',
+    });
+    const briefUser = brief[brief.length - 1].content;
+    assert.ok(briefUser.includes('次要配角'), '应说明这是次要配角');
+    assert.ok(briefUser.includes('80-150字'), '开场白要求应缩短');
+    assert.equal(briefUser.includes('abilities'), false, '精简档案不应包含 abilities 字段');
+    assert.equal(briefUser.includes('alternate_greetings'), false, '精简档案不应包含备选开场白');
+    assert.ok(briefUser.includes('__NAME__'.replace('__NAME__', '路人甲')));
+
+    const full = prompts.buildProfilePrompt({
+        name: '沈青梧', evidence: 'x', novelTitle: 't', tier: '主角',
+    });
+    const fullUser = full[full.length - 1].content;
+    assert.ok(fullUser.includes('abilities'), '完整档案应包含 abilities');
+    assert.ok(fullUser.includes('alternate_greetings'));
+    assert.ok(fullUser.includes('150-300 字'), '主角的开场白要求应是 150-300 字');
+    assert.equal(fullUser.includes('__NAME__'), false, '占位符必须被替换掉');
+});
+
+test('档案提示词会把已知别名写进去', () => {
+    const messages = prompts.buildProfilePrompt({
+        name: '沈青梧', aliases: ['青梧', '沈师姐'], evidence: 'x', tier: '主角',
+    });
+    const user = messages[messages.length - 1].content;
+    assert.ok(user.includes('青梧'));
+    assert.ok(user.includes('沈师姐'));
+});
+
 console.log(`\n结果：${passed} 通过，${failed} 失败\n`);
 process.exit(failed === 0 ? 0 : 1);

@@ -9,6 +9,7 @@ import {
     buildDiscoveryPrompt,
     buildProfilePrompt,
     buildWorldPrompt,
+    buildClassifyPrompt,
     parseModelJson,
     asArray,
 } from './prompts.js';
@@ -43,6 +44,126 @@ function createLimiter(concurrency) {
 
 // ---------------------------------------------------------------- 模型调用
 
+const REQUEST_TIMEOUT_MS = 600_000;
+
+/** 把用户填的地址规范成 OpenAI 兼容的 base（自动补 /v1，去掉多余的 /chat/completions） */
+export function normalizeApiBase(raw) {
+    const base = String(raw ?? '').trim().replace(/\/+$/, '');
+    if (!base) return '';
+    const withoutEndpoint = base.replace(/\/chat\/completions$/i, '');
+    if (/\/(v\d+|beta)$/i.test(withoutEndpoint)) return withoutEndpoint;
+    return `${withoutEndpoint}/v1`;
+}
+
+function extractContentFromResponse(data) {
+    const choice = Array.isArray(data?.choices) ? data.choices[0] : null;
+    if (choice?.message?.content !== undefined) return String(choice.message.content);
+    if (choice?.text !== undefined) return String(choice.text);
+    if (typeof data?.content === 'string') return data.content;
+    if (typeof data?.text === 'string') return data.text;
+    return '';
+}
+
+/** 非流式响应里的 SSE 文本（有些中转站无视 stream:false，仍回 SSE） */
+function readSseText(body) {
+    const pieces = [];
+    for (const line of String(body).split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('data:')) continue;
+        const payload = trimmed.slice(5).trim();
+        if (!payload || payload === '[DONE]') continue;
+        try {
+            const chunk = JSON.parse(payload);
+            const delta = chunk.choices?.[0]?.delta?.content;
+            const message = chunk.choices?.[0]?.message?.content;
+            if (typeof delta === 'string') pieces.push(delta);
+            else if (typeof message === 'string') pieces.push(message);
+        } catch {
+            // 不是 JSON 的行直接跳过
+        }
+    }
+    return pieces.join('');
+}
+
+/**
+ * 通过酒馆后端转发一次 chat completion 请求。
+ * 走 /api/backends/chat-completions/generate，出站请求与酒馆自身的生成同源同形。
+ */
+async function callCustomApi({ apiConfig, messages, maxTokens, signal, getRequestHeaders }) {
+    const url = normalizeApiBase(apiConfig.url);
+    if (!url) throw new Error('独立 API 未填写接口地址');
+    if (!apiConfig.model) throw new Error('独立 API 未填写模型名');
+
+    const payload = {
+        messages,
+        model: apiConfig.model,
+        chat_completion_source: 'openai',
+        reverse_proxy: url,
+        proxy_password: apiConfig.key || '',
+        stream: apiConfig.stream === true,
+    };
+    if (Number.isFinite(maxTokens) && maxTokens > 0) payload.max_tokens = Math.floor(maxTokens);
+    for (const key of ['temperature', 'top_p', 'frequency_penalty', 'presence_penalty']) {
+        const value = Number(apiConfig[key]);
+        if (Number.isFinite(value)) payload[key] = value;
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort('timeout'), REQUEST_TIMEOUT_MS);
+    if (signal) {
+        signal.addEventListener('abort', () => controller.abort('cancelled'), { once: true });
+    }
+
+    try {
+        const response = await fetch('/api/backends/chat-completions/generate', {
+            method: 'POST',
+            headers: { ...(getRequestHeaders?.() || {}), 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+            signal: controller.signal,
+        });
+
+        const bodyText = await response.text();
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}：${bodyText.slice(0, 300)}`);
+        }
+
+        // 优先按 JSON 解析；解析不出或内容为空时再尝试 SSE
+        let text = '';
+        try {
+            const data = JSON.parse(bodyText);
+            if (data?.error) throw new Error(String(data.message || data.error?.message || 'API 返回错误'));
+            text = extractContentFromResponse(data);
+        } catch (error) {
+            if (error instanceof SyntaxError) {
+                text = readSseText(bodyText);
+            } else {
+                throw error;
+            }
+        }
+        if (!text.trim()) {
+            text = readSseText(bodyText);
+        }
+        if (!text.trim()) throw new Error('API 返回内容为空');
+        return text;
+    } catch (error) {
+        const message = String(error?.message || error);
+        if (error?.name === 'AbortError' || message === 'timeout') {
+            throw new Error('独立 API 请求超时');
+        }
+        if (message === 'cancelled') throw new Error('已取消');
+        if (/Failed to fetch|NetworkError|ECONNREFUSED/i.test(message)) {
+            throw new Error(`连不上独立 API（${message}）。检查地址、Key 和网络`);
+        }
+        throw new Error(message);
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+/**
+ * 主通道：酒馆当前连接（generateRaw）。
+ */
 export function createModelClient(context) {
     if (!context || typeof context.generateRaw !== 'function') {
         throw new Error('当前环境不支持 generateRaw，无法调用模型（请确认酒馆版本或酒馆助手扩展已加载）');
@@ -70,6 +191,58 @@ export function createModelClient(context) {
         }
         throw new Error(`模型调用失败：${lastError?.message || lastError}`);
     };
+}
+
+/**
+ * 带重试的独立 API 客户端。
+ */
+export function createCustomApiClient(context, apiConfig) {
+    const getRequestHeaders = context?.getRequestHeaders?.bind(context);
+    return async function callCustom(messages, { maxTokens, retries = 2, signal } = {}) {
+        let lastError = null;
+        for (let attempt = 0; attempt <= retries; attempt++) {
+            if (signal?.aborted) throw new Error('已取消');
+            try {
+                return await callCustomApi({ apiConfig, messages, maxTokens, signal, getRequestHeaders });
+            } catch (error) {
+                lastError = error;
+                // 配置类错误重试没意义，直接抛出
+                if (/未填写|连不上/.test(String(error.message))) throw error;
+                if (attempt >= retries) break;
+                await sleep(1200 * (attempt + 1), signal);
+            }
+        }
+        throw new Error(`独立 API 调用失败：${lastError?.message || lastError}`);
+    };
+}
+
+/**
+ * 按设置挑一个模型客户端。
+ * @param {object} context 酒馆上下文
+ * @param {{client?: 'tavern'|'custom', custom?: object}} settings
+ */
+export function createConfiguredModelClient(context, settings = {}) {
+    if (settings.client === 'custom') {
+        if (typeof fetch !== 'function') throw new Error('当前环境不支持 fetch，无法使用独立 API');
+        return createCustomApiClient(context, settings.custom || {});
+    }
+    return createModelClient(context);
+}
+
+/** 探测独立 API 是否可达：拉一次 /models 或发一个最小请求 */
+export async function testCustomApi({ apiConfig, getRequestHeaders }) {
+    const url = normalizeApiBase(apiConfig.url);
+    if (!url) throw new Error('未填写接口地址');
+    if (!apiConfig.model) throw new Error('未填写模型名');
+
+    const started = Date.now();
+    const text = await callCustomApi({
+        apiConfig,
+        messages: [{ role: 'user', content: '回复两个字：可用' }],
+        maxTokens: 16,
+        getRequestHeaders,
+    });
+    return { ok: true, elapsedMs: Date.now() - started, sample: text.slice(0, 60) };
 }
 
 function sleep(ms, signal) {
@@ -384,21 +557,110 @@ export async function discoverCharacters({ chunks, novelTitle, callModel, concur
 /**
  * 阶段 C：单个角色的结构化档案。
  */
-export async function extractProfile({ character, evidence, novelTitle, callModel, instruction, signal }) {
+export async function extractProfile({ character, evidence, novelTitle, callModel, instruction, signal, tier }) {
     const messages = buildProfilePrompt({
         name: character.name,
         aliases: character.aliases,
         evidence,
         novelTitle,
         instruction,
+        tier,
     });
-    const raw = await callModel(messages, { maxTokens: 6000, signal });
+    const raw = await callModel(messages, { maxTokens: isBriefTier(tier) ? 3000 : 6000, signal });
     const parsed = parseModelJson(raw);
     const profile = Array.isArray(parsed) ? parsed[0] : parsed;
     if (!profile || typeof profile !== 'object') {
         throw new Error(`${character.name} 的档案格式不正确`);
     }
     return { ...profile, name: String(profile.name || character.name).trim() };
+}
+
+/** 是否走精简档案 */
+export function isBriefTier(tier) {
+    return tier === '次要配角' || tier === 'brief';
+}
+
+/**
+ * 角色分级：主角 / 主要配角 / 次要配角。
+ *
+ * 只发名单 + 抽样原文，一次请求搞定。分级结果决定后续档案的详细度与配额，
+ * 所以宁可多花这一次请求，也好过给一堆路人出完整人设。
+ *
+ * @returns {Map<string, {tier: string, reason: string}>} key 为归一化名字
+ */
+export async function classifyCharacters({
+    characters,
+    chunks,
+    novelTitle,
+    callModel,
+    signal,
+    sampleCount = 6,
+}) {
+    const names = characters.map(character => character.name).filter(Boolean);
+    if (!names.length) return new Map();
+
+    const picks = sampleChunks(chunks, sampleCount);
+    const evidence = picks
+        .map(item => `【第 ${item.index + 1} 段节选】\n${item.text.slice(0, 4000)}`)
+        .join('\n\n');
+
+    const messages = buildClassifyPrompt({ names, evidence, novelTitle });
+    const raw = await callModel(messages, { maxTokens: 2000, signal });
+    const parsed = asArray(parseModelJson(raw), 'characters');
+
+    const result = new Map();
+    for (const entry of parsed) {
+        const name = String(entry?.name ?? '').trim();
+        if (!name) continue;
+        const tier = normalizeTier(entry?.tier);
+        result.set(canonicalName(name), { tier, reason: String(entry?.reason ?? '').trim() });
+    }
+    return result;
+}
+
+/**
+ * 档位归一：显式词表优先，再做保守兜底。
+ *
+ * 为什么不用子串/前缀判断：中文里「第一主角」包含「配角」两个字，
+ * 「主要配角」又包含「主角」两个字，任何朴素的 includes/startsWith 都会判错其中一边。
+ * 词表把常见写法写死，剩下的交给严格正则。
+ */
+const TIER_ALIASES = new Map([
+    ['主角', '主角'], ['主人公', '主角'], ['男主', '主角'], ['女主', '主角'],
+    ['第一主角', '主角'], ['视角人物', '主角'], ['主视角', '主角'],
+    ['protagonist', '主角'], ['main', '主角'], ['main character', '主角'],
+    ['主要配角', '主要配角'], ['重要配角', '主要配角'], ['配角', '主要配角'],
+    ['次主角', '主要配角'], ['男二', '主要配角'], ['女二', '主要配角'],
+    ['supporting', '主要配角'], ['supporting character', '主要配角'], ['major', '主要配角'],
+    ['次要配角', '次要配角'], ['龙套', '次要配角'], ['背景人物', '次要配角'],
+    ['路人', '次要配角'], ['npc', '次要配角'], ['minor', '次要配角'], ['side', '次要配角'],
+]);
+
+/** 明确的"次要"线索，优先级最高：出现它就不再往上升级 */
+const MINOR_HINT = /次要|龙套|背景|路人|npc|minor|side character/i;
+
+export function normalizeTier(value) {
+    const text = String(value ?? '').trim();
+    if (!text) return '主要配角';
+    const lower = text.toLowerCase();
+
+    // 1) 降级线索优先：「配角（龙套）」这种带次要注释的写法不能被词表的「配角」吃掉
+    if (MINOR_HINT.test(text)) return '次要配角';
+
+    // 2) 显式词表
+    if (TIER_ALIASES.has(lower)) return TIER_ALIASES.get(lower);
+
+    // 3) 带注释的写法：「主角（视角人物）」→ 取头部再查一次
+    const head = text.split(/[（(【\s,，、:：/]/)[0].trim().toLowerCase();
+    if (TIER_ALIASES.has(head)) return TIER_ALIASES.get(head);
+
+    // 4) 兜底：写着"主角"且不含"配角"才算主角；「第一主角」这类靠词表和这里共同兜住
+    const saysSupporting = text.includes('配角');
+    if (!saysSupporting && /主角|主人公|protagonist/i.test(text)) return '主角';
+    if (saysSupporting || /主要|重要|supporting|major/i.test(text)) return '主要配角';
+
+    // 认不出来就当主要配角，至少不会被误降级成精简档案
+    return '主要配角';
 }
 
 /**

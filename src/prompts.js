@@ -48,23 +48,9 @@ ${numberedChunks(chunks)}`;
 
 // ---------------------------------------------------------------- C. 单人档案
 
-export function buildProfilePrompt({ name, aliases, evidence, novelTitle, instruction }) {
-    const aliasText = aliases?.length ? aliases.join('、') : '无';
-    const extra = instruction ? `\n额外要求：${instruction}\n` : '';
-
-    const user = `下面是小说《${novelTitle || '未命名'}》中与角色「${name}」相关的全部原文片段（可能有重复或顺序错乱）。
-
-请为「${name}」整理一张角色扮演角色卡所需的档案。${extra}
-硬性要求：
-1. 只使用片段中出现的信息；片段没提到的字段填空字符串 ""，不要写"未知""原文未提及"。
-2. 不要写分析过程、不要复述任务、不要输出 JSON 以外的任何字符。
-3. 用中文书写，条目化，不要用 Markdown 标题符号。
-4. example_dialogue 必须从原文摘取或改写该角色的真实台词，每条以"角色名："或"我："开头，4-8 条。
-5. first_mes 是一段 150-300 字的开场白，用该角色的第一人称或第三人称叙述，写出当下场景，让玩家可以直接接着演下去。
-
-只输出如下 JSON 对象：
-{
-  "name": "${name}",
+/** 完整档案：主角用，字段全、要求细 */
+const PROFILE_SCHEMA_FULL = `{
+  "name": "__NAME__",
   "aliases": ["别名"],
   "role": "身份定位",
   "summary": "150字以内的人物概述",
@@ -83,7 +69,56 @@ export function buildProfilePrompt({ name, aliases, evidence, novelTitle, instru
   "example_dialogue": ["角色名：台词", "我：台词"],
   "confidence": "high 或 mid 或 low，表示素材是否充足",
   "notes": "其他值得写进角色卡的细节"
-}
+}`;
+
+/** 精简档案：次要配角用，只保留撑得起一张卡的最小信息量 */
+const PROFILE_SCHEMA_BRIEF = `{
+  "name": "__NAME__",
+  "aliases": ["别名"],
+  "role": "身份定位",
+  "summary": "100字以内的概述",
+  "personality": "性格与行事风格，一段话说清",
+  "personality_tags": ["关键词"],
+  "speech_style": "说话风格、口癖、称呼他人的方式",
+  "relationships": "与主要角色的关系",
+  "scenario": "适合开场时的处境",
+  "first_mes": "80-150字的开场白",
+  "example_dialogue": ["角色名：台词", "我：台词"],
+  "confidence": "high 或 mid 或 low",
+  "notes": "补充细节"
+}`;
+
+const PROFILE_RULES_FULL = `4. example_dialogue 必须从原文摘取或改写该角色的真实台词，每条以"角色名："或"我："开头，4-8 条。
+5. first_mes 是一段 150-300 字的开场白，用该角色的第一人称或第三人称叙述，写出当下场景，让玩家可以直接接着演下去。`;
+
+const PROFILE_RULES_BRIEF = `4. example_dialogue 摘取 2-4 条该角色的真实台词即可。
+5. first_mes 是一段 80-150 字的简短开场白，能让人物立起来就行，不必铺陈场景。
+6. 这是次要配角，篇幅要克制：不要写长篇外貌、能力、背景，把信息密度放在性格和说话方式上。`;
+
+/**
+ * @param {{name: string, aliases?: string[], evidence: string, novelTitle?: string, instruction?: string, tier?: '主角'|'主要配角'|'次要配角'|'brief'|'full'}} options
+ */
+export function buildProfilePrompt({ name, aliases, evidence, novelTitle, instruction, tier }) {
+    const extra = instruction ? `\n额外要求：${instruction}\n` : '';
+    const isBrief = tier === '次要配角' || tier === 'brief';
+    const schema = (isBrief ? PROFILE_SCHEMA_BRIEF : PROFILE_SCHEMA_FULL).replace('__NAME__', name);
+    const rules = isBrief ? PROFILE_RULES_BRIEF : PROFILE_RULES_FULL;
+    const tierNote = isBrief
+        ? '这是一个次要配角，档案保持精简，别写成长篇小传。'
+        : '这是一个主要角色，档案要尽量完整。';
+    const aliasNote = aliases?.length ? `\n已知该角色的其他称呼：${aliases.join('、')}` : '';
+
+    const user = `下面是小说《${novelTitle || '未命名'}》中与角色「${name}」相关的全部原文片段（可能有重复或顺序错乱）。
+
+请为「${name}」整理一张角色扮演角色卡所需的档案。${tierNote}${aliasNote}${extra}
+硬性要求：
+1. 只使用片段中出现的信息；片段没提到的字段填空字符串 ""，不要写"未知""原文未提及"。
+2. 不要写分析过程、不要复述任务、不要输出 JSON 以外的任何字符。
+3. 用中文书写，条目化，不要用 Markdown 标题符号。
+${rules}
+
+只输出如下 JSON 对象：
+${schema}
 
 相关原文片段：
 ${evidence}`;
@@ -120,6 +155,38 @@ export function buildWorldPrompt({ characters, evidence, novelTitle, categories,
 已提取的角色：${(characters || []).join('、') || '无'}
 
 小说素材：
+${evidence}`;
+
+    return [
+        { role: 'system', content: EXTRACT_SYSTEM_PROMPT },
+        { role: 'user', content: user },
+    ];
+}
+
+// ---------------------------------------------------------------- 角色分级
+
+export function buildClassifyPrompt({ names, evidence, novelTitle }) {
+    const user = `下面是小说《${novelTitle || '未命名'}》的人物名单，以及若干原文节选。
+
+请判断每个人物的**重要程度**，分为三档：
+
+- "主角"：故事的核心视角或主要推动者，贯穿全书，有完整的成长线
+- "主要配角"：戏份很多、对主线有实质影响，但并非核心视角
+- "次要配角"：偶尔出场、功能性角色、只被提及的背景人物
+
+判断依据：
+1. 优先看该人物在节选中出现的频率与深度（是否推动情节、是否有对话与心理描写）
+2. 名字出现在书名/简介/章节标题里的，通常重要度更高
+3. 拿不准就判低一档——宁缺勿滥，角色卡太多反而不好用
+
+只输出 JSON 数组，不要解释，不要 Markdown 代码块：
+[
+  {"name": "人物名", "tier": "主角", "reason": "一句话理由"}
+]
+
+人物名单：${(names || []).join('、')}
+
+原文节选：
 ${evidence}`;
 
     return [

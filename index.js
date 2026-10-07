@@ -18,12 +18,16 @@ import { saveSettingsDebounced, getCharacters } from '../../../../script.js';
 
 import {
     splitNovel,
-    createModelClient,
+    createConfiguredModelClient,
+    testCustomApi,
     discoverCharacters,
     mergeCharacters,
     collectEvidence,
     extractProfile,
     extractWorldEntries,
+    classifyCharacters,
+    isBriefTier,
+    canonicalName,
 } from './src/ai.js';
 
 import {
@@ -86,6 +90,19 @@ const DEFAULT_SETTINGS = Object.freeze({
     volumeCount: 6,
     charsPerVolume: 500_000,
     splitByChapter: true,
+    // 独立 API
+    apiClient: 'tavern',          // tavern | custom
+    apiUrl: '',
+    apiKey: '',
+    apiModel: '',
+    apiStream: false,
+    apiTemperature: '',
+    apiTopP: '',
+    // 角色分级
+    tierEnabled: true,
+    maxProtagonists: 3,
+    maxSupporting: 6,
+    briefSupporting: true,
 });
 
 const state = {
@@ -258,6 +275,10 @@ function renderPanelHtml() {
 
     <div class="n2c-section">
       <div class="n2c-label">2. 识别到的角色 <span class="n2c-hint-inline">（可改名字、取消勾选）</span></div>
+      <div class="n2c-row">
+        <div class="menu_button n2c-small" id="n2c-classify" title="让模型判定谁是主角、谁是配角"><i class="fa-solid fa-ranking-star"></i> 判定主角/配角</div>
+        <span class="n2c-hint-inline" id="n2c-tier-summary"></span>
+      </div>
       <div id="n2c-chars" class="n2c-chars"></div>
     </div>
 
@@ -293,8 +314,7 @@ function renderPanelHtml() {
           </div>
 
           <div class="n2c-checks">
-            <label class="checkbox_label"><input type="checkbox" id="n2c-with-world" ${s.withWorldBook ? 'checked' : ''}><span>同时提取世界书</span></label>
-            <label class="checkbox_label"><input type="checkbox" id="n2c-embed-world" ${s.embedWorldBook ? 'checked' : ''}><span>世界书内嵌进角色卡</span></label>
+            <label class="checkbox_label"><input type="checkbox" id="n2c-with-world" ${s.withWorldBook ? 'checked' : ''}><span>同时提取世界书</span></label>            <label class="checkbox_label"><input type="checkbox" id="n2c-embed-world" ${s.embedWorldBook ? 'checked' : ''}><span>世界书内嵌进角色卡</span></label>
             <label class="checkbox_label"><input type="checkbox" id="n2c-save-world-file" ${s.saveWorldBookFile ? 'checked' : ''}><span>额外导出世界书 JSON</span></label>
             <label class="checkbox_label"><input type="checkbox" id="n2c-import" ${s.importToTavern ? 'checked' : ''}><span>自动导入到角色列表</span></label>
             <label class="checkbox_label"><input type="checkbox" id="n2c-placeholder" ${s.placeholderAvatar ? 'checked' : ''}><span>没有底图时生成占位头像</span></label>
@@ -304,6 +324,51 @@ function renderPanelHtml() {
 
           <div class="n2c-field n2c-field-wide"><span>世界书条目数上限（0 = 由模型决定）</span>
             <input type="number" id="n2c-world-count" class="text_pole" min="0" max="60" step="1" value="${s.worldEntryCount}"></div>
+
+          <hr class="n2c-hr">
+          <div class="n2c-label">角色分级</div>
+          <div class="n2c-checks">
+            <label class="checkbox_label"><input type="checkbox" id="n2c-tier-enabled" ${s.tierEnabled ? 'checked' : ''}><span>区分主角与配角</span></label>
+            <label class="checkbox_label"><input type="checkbox" id="n2c-brief-supporting" ${s.briefSupporting ? 'checked' : ''}><span>配角用精简档案</span></label>
+          </div>
+          <div class="n2c-grid">
+            <label class="n2c-field"><span>主角最多几个</span>
+              <input type="number" id="n2c-max-protagonists" class="text_pole" min="1" max="20" step="1" value="${s.maxProtagonists}"></label>
+            <label class="n2c-field"><span>配角最多几个</span>
+              <input type="number" id="n2c-max-supporting" class="text_pole" min="0" max="40" step="1" value="${s.maxSupporting}"></label>
+          </div>
+          <div class="n2c-hint">分级后按「主角 → 主要配角 → 次要配角」排序，各自按上限取用。配角用精简档案能省一半输出 token，也让卡片更干净。</div>
+
+          <hr class="n2c-hr">
+          <div class="n2c-label">模型通道</div>
+          <label class="n2c-field n2c-field-wide"><span>用哪个通道分析</span>
+            <select id="n2c-api-client" class="text_pole">
+              <option value="tavern" ${s.apiClient === 'tavern' ? 'selected' : ''}>酒馆当前连接</option>
+              <option value="custom" ${s.apiClient === 'custom' ? 'selected' : ''}>独立 API（自己填地址和模型）</option>
+            </select></label>
+
+          <div id="n2c-api-config" class="n2c-api-config">
+            <label class="n2c-field n2c-field-wide"><span>接口地址（填到版本段即可，如 https://api.deepseek.com/v1）</span>
+              <input type="text" id="n2c-api-url" class="text_pole" placeholder="https://api.deepseek.com/v1" value="${escapeHtml(s.apiUrl)}"></label>
+            <label class="n2c-field n2c-field-wide"><span>API Key</span>
+              <input type="password" id="n2c-api-key" class="text_pole" placeholder="sk-..." value="${escapeHtml(s.apiKey)}"></label>
+            <div class="n2c-grid">
+              <label class="n2c-field"><span>模型名</span>
+                <input type="text" id="n2c-api-model" class="text_pole" placeholder="deepseek-chat" value="${escapeHtml(s.apiModel)}"></label>
+              <label class="n2c-field"><span>temperature</span>
+                <input type="number" id="n2c-api-temperature" class="text_pole" min="0" max="2" step="0.1" placeholder="跟随默认" value="${escapeHtml(s.apiTemperature)}"></label>
+              <label class="n2c-field"><span>top_p</span>
+                <input type="number" id="n2c-api-top-p" class="text_pole" min="0" max="1" step="0.05" placeholder="跟随默认" value="${escapeHtml(s.apiTopP)}"></label>
+            </div>
+            <div class="n2c-checks">
+              <label class="checkbox_label"><input type="checkbox" id="n2c-api-stream" ${s.apiStream ? 'checked' : ''}><span>流式请求</span></label>
+            </div>
+            <div class="n2c-row">
+              <div class="menu_button n2c-small" id="n2c-api-test"><i class="fa-solid fa-plug-circle-check"></i> 测试连接</div>
+              <span class="n2c-hint" id="n2c-api-test-result"></span>
+            </div>
+            <div class="n2c-hint">提示：独立 API 走酒馆后端转发，请求与普通生成同源。Key 只保存在本地设置里，不会上传。若用中转站，地址填到版本段即可，服务端会自己拼 <code>/chat/completions</code>。</div>
+          </div>
 
           <div class="n2c-field n2c-field-wide"><span>底图（可选，作为所有角色卡的初始头像）</span>
             <div class="n2c-row">
@@ -545,6 +610,51 @@ function bindPanelEvents() {
 
     bindNumber('n2c-volume-count', 'volumeCount', { min: 1, max: 200, invalidates: '卷数' });
     bindNumber('n2c-chars-per-volume', 'charsPerVolume', { min: 1000, max: 3_000_000, invalidates: '每卷字数' });
+    bindNumber('n2c-max-protagonists', 'maxProtagonists', { min: 1, max: 20 });
+    bindNumber('n2c-max-supporting', 'maxSupporting', { min: 0, max: 40 });
+
+    // ---- 独立 API
+    $id('n2c-api-client')?.addEventListener('change', event => {
+        s.apiClient = event.target.value;
+        putSettings();
+        syncApiConfigVisibility();
+    });
+
+    const bindApiText = (id, key) => {
+        $id(id)?.addEventListener('input', event => {
+            s[key] = event.target.value;
+            if (state._apiTimer) clearTimeout(state._apiTimer);
+            state._apiTimer = setTimeout(putSettings, 500);
+        });
+    };
+    bindApiText('n2c-api-url', 'apiUrl');
+    bindApiText('n2c-api-key', 'apiKey');
+    bindApiText('n2c-api-model', 'apiModel');
+    bindApiText('n2c-api-temperature', 'apiTemperature');
+    bindApiText('n2c-api-top-p', 'apiTopP');
+
+    $id('n2c-api-stream')?.addEventListener('change', event => {
+        s.apiStream = event.target.checked;
+        putSettings();
+    });
+
+    $id('n2c-api-test')?.addEventListener('click', () => testApiConnection());
+
+    // ---- 角色分级
+    for (const [id, key] of [
+        ['n2c-tier-enabled', 'tierEnabled'],
+        ['n2c-brief-supporting', 'briefSupporting'],
+    ]) {
+        $id(id)?.addEventListener('change', event => {
+            s[key] = event.target.checked;
+            putSettings();
+            renderCharacterList();
+        });
+    }
+
+    $id('n2c-classify')?.addEventListener('click', () => runClassify());
+
+    syncApiConfigVisibility();
 
     // ---- 分卷相关
     $id('n2c-split-enabled')?.addEventListener('change', event => {
@@ -773,13 +883,19 @@ function renderCharacterList() {
 
     if (!state.characters.length) {
         host.innerHTML = '<div class="n2c-hint">还没有识别结果，先点「分析人物」。</div>';
+        updateTierSummary();
         return;
     }
+
+    const showTier = getSettings().tierEnabled;
 
     const rows = state.characters.map((character, index) => {
         const checked = character.selected !== false ? 'checked' : '';
         const confidence = character.profile?.confidence
             ? `<span class="n2c-badge n2c-badge-${escapeHtml(String(character.profile.confidence).toLowerCase())}">${escapeHtml(character.profile.confidence)}</span>`
+            : '';
+        const tierBadge = showTier && character.tier
+            ? `<span class="n2c-tier n2c-tier-${tierClass(character.tier)}" title="${escapeHtml(character.tierReason || '')}">${escapeHtml(character.tier)}</span>`
             : '';
         return `
 <div class="n2c-char-row" data-index="${index}">
@@ -787,6 +903,7 @@ function renderCharacterList() {
   <input type="text" class="text_pole n2c-char-name" value="${escapeHtml(character.name)}">
   <input type="text" class="text_pole n2c-char-role" value="${escapeHtml(character.role || '')}" placeholder="身份定位">
   <span class="n2c-char-meta">${character.chunkIndexes?.length || 0} 段出场 ${confidence}</span>
+  ${tierBadge}
 </div>`;
     }).join('');
 
@@ -796,6 +913,7 @@ function renderCharacterList() {
         const index = Number(row.dataset.index);
         row.querySelector('.n2c-char-toggle')?.addEventListener('change', event => {
             state.characters[index].selected = event.target.checked;
+            updateTierSummary();
         });
         row.querySelector('.n2c-char-name')?.addEventListener('input', event => {
             state.characters[index].name = event.target.value;
@@ -804,6 +922,14 @@ function renderCharacterList() {
             state.characters[index].role = event.target.value;
         });
     });
+
+    updateTierSummary();
+}
+
+function tierClass(tier) {
+    if (tier === '主角') return 'lead';
+    if (tier === '次要配角') return 'minor';
+    return 'support';
 }
 
 function selectedCharacters() {
@@ -827,11 +953,14 @@ function renderResults() {
         const summary = profile._summary || summarizeCard(profile.cardV3 || profile.cardV2);
         const png = profile._pngBytes;
         const preview = png ? URL.createObjectURL(new Blob([png], { type: 'image/png' })) : '';
+        const tierBadge = profile.tier
+            ? `<span class="n2c-tier n2c-tier-${tierClass(profile.tier)}">${escapeHtml(profile.tier)}</span>`
+            : '';
         return `
 <div class="n2c-result" data-index="${index}">
   ${preview ? `<img class="n2c-result-avatar" src="${preview}" alt="${escapeHtml(summary.name)}">` : ''}
   <div class="n2c-result-body">
-    <div class="n2c-result-name">${escapeHtml(summary.name)}</div>
+    <div class="n2c-result-name">${escapeHtml(summary.name)} ${tierBadge}</div>
     <div class="n2c-result-stats">
       正文 ${summary.total} 字 · 描述 ${summary.description} · 性格 ${summary.personality} ·
       场景 ${summary.scenario} · 开场白 ${summary.first_mes} · 示例 ${summary.mes_example}
@@ -884,9 +1013,179 @@ function requireContext() {
     return context;
 }
 
+/** 只有选了独立 API 才展开配置区 */
+function syncApiConfigVisibility() {
+    const box = $id('n2c-api-config');
+    if (!box) return;
+    box.style.display = getSettings().apiClient === 'custom' ? '' : 'none';
+}
+
 function buildModelClient() {
     const context = requireContext();
-    return createModelClient(context);
+    const settings = getSettings();
+
+    if (settings.apiClient !== 'custom') {
+        return createConfiguredModelClient(context, { client: 'tavern' });
+    }
+
+    const custom = {
+        url: settings.apiUrl,
+        key: settings.apiKey,
+        model: settings.apiModel,
+        stream: settings.apiStream === true,
+        temperature: settings.apiTemperature === '' ? undefined : Number(settings.apiTemperature),
+        top_p: settings.apiTopP === '' ? undefined : Number(settings.apiTopP),
+    };
+    log(`使用独立 API：${custom.model || '(未填模型)'} @ ${custom.url || '(未填地址)'}`);
+    return createConfiguredModelClient(context, { client: 'custom', custom });
+}
+
+async function testApiConnection() {
+    const result = $id('n2c-api-test-result');
+    const settings = getSettings();
+    const custom = {
+        url: settings.apiUrl,
+        key: settings.apiKey,
+        model: settings.apiModel,
+        stream: false,
+        temperature: undefined,
+        top_p: undefined,
+    };
+
+    if (!custom.url || !custom.model) {
+        if (result) result.textContent = '请先填写接口地址和模型名';
+        toast('warn', '请先填写接口地址和模型名');
+        return;
+    }
+
+    if (result) result.textContent = '测试中…';
+    const button = $id('n2c-api-test');
+    if (button) button.classList.add('n2c-busy');
+
+    try {
+        const context = requireContext();
+        const response = await testCustomApi({
+            apiConfig: custom,
+            getRequestHeaders: context.getRequestHeaders?.bind(context),
+        });
+        const text = `连接成功（${response.elapsedMs} ms）回应：${response.sample}`;
+        if (result) result.textContent = text;
+        log(`独立 API 测试成功：${response.elapsedMs} ms`);
+        toast('success', '独立 API 可用');
+    } catch (error) {
+        const text = `失败：${error.message}`;
+        if (result) result.textContent = text;
+        log(`独立 API 测试失败：${error.message}`, 'error');
+        toast('error', `独立 API 不可用：${error.message}`);
+    } finally {
+        if (button) button.classList.remove('n2c-busy');
+    }
+}
+
+/** 角色分级：调模型判定三档，然后按配额筛选 */
+async function runClassify() {
+    if (state.running) return;
+    if (!state.characters.length) {
+        toast('warn', '请先点「分析人物」得到候选角色');
+        return;
+    }
+    const text = activeText().trim();
+    if (!text) return;
+
+    const abort = new AbortController();
+    state.abort = abort;
+    const button = $id('n2c-classify');
+    if (button) button.classList.add('n2c-busy');
+
+    try {
+        await ensureChunks(text);
+        const callModel = buildModelClient();
+        log(`开始判定 ${state.characters.length} 个角色的重要程度…`);
+
+        const tiers = await classifyCharacters({
+            characters: state.characters,
+            chunks: state.chunks,
+            novelTitle: state.novelTitle,
+            callModel,
+            signal: abort.signal,
+        });
+
+        let labeled = 0;
+        for (const character of state.characters) {
+            const hit = tiers.get(canonicalName(character.name));
+            if (hit) {
+                character.tier = hit.tier;
+                character.tierReason = hit.reason;
+                labeled++;
+            } else if (!character.tier) {
+                // 模型没提到这个人物，保守当作主要配角
+                character.tier = '主要配角';
+            }
+        }
+
+        log(`分级完成：${labeled}/${state.characters.length} 个角色被明确判定`);
+        applyTierQuotas();
+        renderCharacterList();
+        updateTierSummary();
+    } catch (error) {
+        log(`分级失败：${error.message}`, 'error');
+        toast('error', `分级失败：${error.message}`);
+    } finally {
+        if (button) button.classList.remove('n2c-busy');
+        state.abort = null;
+    }
+}
+
+/** 按主角/配角配额勾选：超出的自动取消勾选，而不是直接删掉 */
+function applyTierQuotas() {
+    const settings = getSettings();
+    if (!settings.tierEnabled) return;
+
+    const order = { '主角': 0, '主要配角': 1, '次要配角': 2 };
+    state.characters.sort((left, right) => {
+        const diff = (order[left.tier] ?? 1) - (order[right.tier] ?? 1);
+        if (diff !== 0) return diff;
+        return (right.score || 0) - (left.score || 0);
+    });
+
+    let protagonists = 0;
+    let supporting = 0;
+    for (const character of state.characters) {
+        const tier = character.tier || '主要配角';
+        if (tier === '主角') {
+            protagonists++;
+            character.selected = protagonists <= (Number(settings.maxProtagonists) || 3);
+        } else {
+            supporting++;
+            character.selected = supporting <= (Number(settings.maxSupporting) || 6);
+        }
+    }
+}
+
+function countTiers() {
+    const counts = { '主角': 0, '主要配角': 0, '次要配角': 0, '未判定': 0 };
+    for (const character of state.characters) {
+        if (character.tier && counts[character.tier] !== undefined) counts[character.tier]++;
+        else counts['未判定']++;
+    }
+    return counts;
+}
+
+function updateTierSummary() {
+    const summary = $id('n2c-tier-summary');
+    if (!summary) return;
+    if (!getSettings().tierEnabled) {
+        summary.textContent = '（分级已关闭）';
+        return;
+    }
+    if (!state.characters.length) {
+        summary.textContent = '';
+        return;
+    }
+    const counts = countTiers();
+    const selected = state.characters.filter(character => character.selected !== false).length;
+    summary.textContent = `主角 ${counts['主角']} · 主要配角 ${counts['主要配角']} · 次要配角 ${counts['次要配角']}`
+        + `${counts['未判定'] ? ` · 未判定 ${counts['未判定']}` : ''} · 已勾选 ${selected}`;
 }
 
 // ================================================================
@@ -941,6 +1240,34 @@ async function runAnalyze() {
 
         const names = state.characters.map(character => character.name).join('、');
         log(`候选角色：${names}`);
+
+        // 分级：判定主角/配角并按配额勾选。只多花一次请求，但能省掉一堆路人的完整人设。
+        if (settings.tierEnabled) {
+            setProgress(86, '判定主角与配角…');
+            try {
+                const tiers = await classifyCharacters({
+                    characters: state.characters,
+                    chunks: state.chunks,
+                    novelTitle: state.novelTitle,
+                    callModel,
+                    signal: abort.signal,
+                });
+                for (const character of state.characters) {
+                    const hit = tiers.get(canonicalName(character.name));
+                    if (hit) {
+                        character.tier = hit.tier;
+                        character.tierReason = hit.reason;
+                    }
+                }
+                const counts = countTiers();
+                log(`分级结果：主角 ${counts['主角']} · 主要配角 ${counts['主要配角']} · 次要配角 ${counts['次要配角']}`
+                    + `${counts['未判定'] ? ` · 未判定 ${counts['未判定']}` : ''}`);
+                applyTierQuotas();
+            } catch (error) {
+                log(`分级失败，改为全部按主要角色处理：${error.message}`, 'warn');
+            }
+        }
+
         renderCharacterList();
         setProgress(100, `识别完成，共 ${state.characters.length} 人`);
         toast('success', `识别到 ${state.characters.length} 个角色，可以生成角色卡了`);
@@ -1016,13 +1343,19 @@ async function runGenerate() {
         for (let index = 0; index < total; index++) {
             if (abort.signal.aborted) throw new Error('已中止');
             const character = targets[index];
+            const tier = settings.tierEnabled ? (character.tier || '主要配角') : '主角';
+            const brief = settings.briefSupporting && isBriefTier(tier);
+            const tierTag = settings.tierEnabled ? `[${tier}${brief ? '·精简' : ''}] ` : '';
+
             setProgress(20 + (index / total) * 70, `提取档案 ${index + 1}/${total}：${character.name}`);
-            log(`提取「${character.name}」的人设…`);
+            log(`${tierTag}提取「${character.name}」的人设…`);
 
             const evidence = collectEvidence(state.chunks, character, {
-                maxChunks: Number(settings.evidenceChunks) || 8,
+                maxChunks: brief
+                    ? Math.max(3, Math.floor((Number(settings.evidenceChunks) || 8) * 0.6))
+                    : (Number(settings.evidenceChunks) || 8),
                 windowSize: 1500,
-                maxChars: 14000,
+                maxChars: brief ? 8000 : 14000,
             });
             if (!evidence) {
                 log(`「${character.name}」在原文里找不到可用的片段，跳过`, 'warn');
@@ -1037,10 +1370,13 @@ async function runGenerate() {
                     callModel,
                     instruction: settings.extraInstruction,
                     signal: abort.signal,
+                    tier: brief ? '次要配角' : '主角',
                 });
                 character.profile = profile;
+                if (settings.tierEnabled) profile.tier = tier;
 
                 const built = await buildProfileCard(character, profile);
+                built.tier = tier;
                 state.profiles.push(built);
                 renderResults();
                 log(`「${built.name}」完成：正文 ${built._summary.total} 字`);

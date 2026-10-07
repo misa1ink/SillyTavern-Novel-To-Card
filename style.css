@@ -141,6 +141,66 @@
     background: rgba(192, 57, 43, 0.2);
 }
 
+/* ---------------- 角色分级 ---------------- */
+
+#n2c-panel .n2c-tier {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 10px;
+    white-space: nowrap;
+    border: 0.5px solid transparent;
+}
+
+#n2c-panel .n2c-tier-lead {
+    background: rgba(184, 51, 106, 0.18);
+    border-color: rgba(184, 51, 106, 0.5);
+    color: var(--n2c-accent, #b8336a);
+    font-weight: 600;
+}
+
+#n2c-panel .n2c-tier-support {
+    background: rgba(128, 128, 128, 0.16);
+    border-color: rgba(128, 128, 128, 0.35);
+}
+
+#n2c-panel .n2c-tier-minor {
+    background: transparent;
+    border-color: rgba(128, 128, 128, 0.28);
+    opacity: 0.66;
+}
+
+#n2c-panel .n2c-char-row {
+    grid-template-columns: auto minmax(70px, 1fr) minmax(90px, 1.3fr) auto auto;
+}
+
+/* ---------------- 独立 API ---------------- */
+
+#n2c-panel .n2c-hr {
+    border: none;
+    border-top: 0.5px solid var(--color-border-tertiary, rgba(128, 128, 128, 0.25));
+    margin: 12px 0 8px;
+}
+
+#n2c-panel .n2c-api-config {
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: var(--color-background-secondary, rgba(128, 128, 128, 0.07));
+    margin-bottom: 8px;
+}
+
+#n2c-panel .n2c-api-config code {
+    font-size: 10px;
+    padding: 0 3px;
+    border-radius: 2px;
+    background: rgba(128, 128, 128, 0.2);
+}
+
+#n2c-panel .menu_button.n2c-busy {
+    opacity: 0.55;
+    pointer-events: none;
+}
+
 /* ---------------- 结果 ---------------- */
 
 #n2c-panel .n2c-results {
