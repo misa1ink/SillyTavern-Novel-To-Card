@@ -227,6 +227,76 @@
     margin: 0;
 }
 
+/* ---------------- 分卷列表 ---------------- */
+
+#n2c-panel .n2c-volume-list {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin-top: 8px;
+    max-height: 260px;
+    overflow-y: auto;
+}
+
+#n2c-panel .n2c-volume-row {
+    display: grid;
+    grid-template-columns: 22px minmax(60px, 1fr) auto auto auto;
+    gap: 8px;
+    align-items: center;
+    padding: 5px 8px;
+    border-radius: 5px;
+    border: 0.5px solid transparent;
+    background: var(--color-background-secondary, rgba(128, 128, 128, 0.07));
+    cursor: pointer;
+    font-size: 11px;
+    line-height: 1.5;
+    transition: border-color 0.12s, background 0.12s;
+}
+
+#n2c-panel .n2c-volume-row:hover {
+    border-color: var(--color-border-secondary, rgba(128, 128, 128, 0.4));
+}
+
+#n2c-panel .n2c-volume-active {
+    border-color: var(--n2c-accent, #b8336a);
+    background: rgba(184, 51, 106, 0.1);
+}
+
+#n2c-panel .n2c-volume-no {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--color-border-tertiary, rgba(128, 128, 128, 0.25));
+    font-size: 10px;
+    font-weight: 600;
+}
+
+#n2c-panel .n2c-volume-active .n2c-volume-no {
+    background: var(--n2c-accent, #b8336a);
+    color: #fff;
+}
+
+#n2c-panel .n2c-volume-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    opacity: 0.9;
+}
+
+#n2c-panel .n2c-volume-meta {
+    opacity: 0.62;
+    white-space: nowrap;
+}
+
+#n2c-panel .n2c-volume-done {
+    color: #27ae60;
+    font-size: 10px;
+    white-space: nowrap;
+}
+
 /* ---------------- 日志 ---------------- */
 
 #n2c-panel .n2c-log-head {

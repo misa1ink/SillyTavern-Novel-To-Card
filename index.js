@@ -54,6 +54,11 @@ import {
     isPngBytes,
 } from './src/png-card.js';
 
+import {
+    splitIntoVolumes,
+    estimateVolumeCost,
+} from './src/splits.js';
+
 const MODULE_NAME = 'novel_to_card';
 
 const DEFAULT_SETTINGS = Object.freeze({
@@ -75,6 +80,12 @@ const DEFAULT_SETTINGS = Object.freeze({
     creatorName: '小说转角色卡',
     cardVersionTag: '1.0',
     autoTag: true,
+    // 分卷
+    splitEnabled: false,
+    splitMode: 'auto',
+    volumeCount: 6,
+    charsPerVolume: 500_000,
+    splitByChapter: true,
 });
 
 const state = {
@@ -89,6 +100,10 @@ const state = {
     running: false,
     abort: null,
     logLines: [],
+    // 分卷
+    volumes: [],
+    volumeIndex: 0,
+    volumeWarnings: [],
 };
 
 // ================================================================
@@ -194,6 +209,40 @@ function renderPanelHtml() {
       </div>
       <textarea id="n2c-text" class="text_pole n2c-textarea" rows="6" placeholder="在此粘贴小说正文，或点右上角选择文件（建议单次不超过 30 万字）"></textarea>
       <div class="n2c-hint" id="n2c-text-info">未载入文本</div>
+    </div>
+
+    <div class="n2c-section">
+      <div class="inline-drawer n2c-subdrawer">
+        <div class="inline-drawer-toggle inline-drawer-header">
+          <b>1.5 分卷（长篇小说强烈建议）</b>
+          <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+        </div>
+        <div class="inline-drawer-content">
+          <div class="n2c-checks">
+            <label class="checkbox_label"><input type="checkbox" id="n2c-split-enabled" ${s.splitEnabled ? 'checked' : ''}><span>启用分卷</span></label>
+            <label class="checkbox_label"><input type="checkbox" id="n2c-split-by-chapter" ${s.splitByChapter ? 'checked' : ''}><span>优先按章节边界切（不切在句子中间）</span></label>
+          </div>
+
+          <div class="n2c-grid">
+            <label class="n2c-field"><span>分卷方式</span>
+              <select id="n2c-split-mode" class="text_pole">
+                <option value="auto" ${s.splitMode === 'auto' ? 'selected' : ''}>按每卷字数</option>
+                <option value="count" ${s.splitMode === 'count' ? 'selected' : ''}>按固定卷数</option>
+              </select></label>
+            <label class="n2c-field" id="n2c-split-count-field"><span>卷数</span>
+              <input type="number" id="n2c-volume-count" class="text_pole" min="1" max="200" step="1" value="${s.volumeCount}"></label>
+            <label class="n2c-field" id="n2c-split-size-field"><span>每卷字数</span>
+              <input type="number" id="n2c-chars-per-volume" class="text_pole" min="1000" max="3000000" step="10000" value="${s.charsPerVolume}"></label>
+          </div>
+
+          <div class="n2c-row">
+            <div class="menu_button n2c-primary" id="n2c-preview-split"><i class="fa-solid fa-scissors"></i> 预览分卷</div>
+            <div class="menu_button n2c-small" id="n2c-clear-split" style="display:none"><i class="fa-solid fa-xmark"></i> 取消分卷</div>
+          </div>
+          <div class="n2c-hint" id="n2c-split-info">尚未分卷。分卷后「分析人物」「生成角色卡」只处理当前卷。</div>
+          <div id="n2c-volume-list" class="n2c-volume-list"></div>
+        </div>
+      </div>
     </div>
 
     <div class="n2c-section">
@@ -314,6 +363,31 @@ function mountPanel() {
 // 事件绑定
 // ================================================================
 
+/** 分卷结果依赖这些参数；改动后旧结果失效，必须重新预览，否则会拿错卷跑 */
+function invalidateSplit(reason) {
+    if (!state.volumes.length) return;
+    state.volumes = [];
+    state.volumeIndex = 0;
+    state.volumeWarnings = [];
+    state.chunks = [];
+    state._chunkSource = '';
+    renderVolumeList();
+    updateTextInfo();
+    log(`「${reason}」已改动，之前的分卷结果已失效，请重新点「预览分卷」`, 'warn');
+}
+
+function bindNumber(id, key, { min, max, invalidates } = {}) {
+    $id(id)?.addEventListener('input', event => {
+        let value = Number(event.target.value);
+        if (!Number.isFinite(value)) return;
+        if (min !== undefined) value = Math.max(min, value);
+        if (max !== undefined) value = Math.min(max, value);
+        getSettings()[key] = value;
+        putSettings();
+        if (invalidates) invalidateSplit(invalidates);
+    });
+}
+
 function bindPanelEvents() {
     const s = getSettings();
 
@@ -424,18 +498,7 @@ function bindPanelEvents() {
         }
     });
 
-    const bindNumber = (id, key, { min, max }) => {
-        $id(id)?.addEventListener('input', event => {
-            let value = Number(event.target.value);
-            if (!Number.isFinite(value)) return;
-            if (min !== undefined) value = Math.max(min, value);
-            if (max !== undefined) value = Math.min(max, value);
-            s[key] = value;
-            putSettings();
-        });
-    };
-
-    bindNumber('n2c-chunk-chars', 'chunkChars', { min: 1500, max: 20000 });
+    bindNumber('n2c-chunk-chars', 'chunkChars', { min: 1500, max: 20000, invalidates: '分段字数' });
     bindNumber('n2c-concurrency', 'concurrency', { min: 1, max: 8 });
     bindNumber('n2c-max-chars', 'maxCharacters', { min: 1, max: 40 });
     bindNumber('n2c-evidence', 'evidenceChunks', { min: 1, max: 20 });
@@ -479,6 +542,50 @@ function bindPanelEvents() {
         if (state._versionTimer) clearTimeout(state._versionTimer);
         state._versionTimer = setTimeout(putSettings, 500);
     });
+
+    bindNumber('n2c-volume-count', 'volumeCount', { min: 1, max: 200, invalidates: '卷数' });
+    bindNumber('n2c-chars-per-volume', 'charsPerVolume', { min: 1000, max: 3_000_000, invalidates: '每卷字数' });
+
+    // ---- 分卷相关
+    $id('n2c-split-enabled')?.addEventListener('change', event => {
+        s.splitEnabled = event.target.checked;
+        putSettings();
+        if (!s.splitEnabled) {
+            state.volumes = [];
+            state.volumeIndex = 0;
+            state.volumeWarnings = [];
+            renderVolumeList();
+            updateTextInfo();
+        } else {
+            log('已启用分卷，记得点「预览分卷」确认切分结果');
+        }
+    });
+
+    $id('n2c-split-by-chapter')?.addEventListener('change', event => {
+        s.splitByChapter = event.target.checked;
+        putSettings();
+        invalidateSplit('按章节切分');
+    });
+
+    $id('n2c-split-mode')?.addEventListener('change', event => {
+        s.splitMode = event.target.value;
+        putSettings();
+        syncSplitModeFields();
+        invalidateSplit('分卷方式');
+    });
+
+    $id('n2c-preview-split')?.addEventListener('click', () => previewSplit());
+
+    $id('n2c-clear-split')?.addEventListener('click', () => {
+        state.volumes = [];
+        state.volumeIndex = 0;
+        state.volumeWarnings = [];
+        renderVolumeList();
+        updateTextInfo();
+        log('已取消分卷，后续将处理全文');
+    });
+
+    syncSplitModeFields();
 }
 
 function updateTextInfo() {
@@ -490,7 +597,164 @@ function updateTextInfo() {
         return;
     }
     const chunks = estimateChunkCount(length);
-    info.textContent = `${length.toLocaleString()} 字 · 约 ${chunks} 段 · 人物扫描约 ${chunks} 次请求`;
+    const splitNote = state.volumes.length
+        ? ` · 已分 ${state.volumes.length} 卷，当前第 ${state.volumeIndex + 1} 卷（${state.volumes[state.volumeIndex]?.chars.toLocaleString() || 0} 字）`
+        : '';
+    info.textContent = `${length.toLocaleString()} 字 · 约 ${chunks} 段 · 人物扫描约 ${chunks} 次请求${splitNote}`;
+}
+
+// ================================================================
+// 分卷
+// ================================================================
+
+/** 按分卷方式显示/隐藏对应的输入框 */
+function syncSplitModeFields() {
+    const s = getSettings();
+    const countField = $id('n2c-split-count-field');
+    const sizeField = $id('n2c-split-size-field');
+    if (!countField || !sizeField) return;
+    const isCount = s.splitMode === 'count';
+    countField.style.display = isCount ? '' : 'none';
+    sizeField.style.display = isCount ? 'none' : '';
+}
+
+/** 当前要处理的文本：分卷启用时只取当前卷 */
+function activeText() {
+    if (state.volumes.length) {
+        const volume = state.volumes[state.volumeIndex];
+        if (volume) return volume.body;
+    }
+    return String(state.rawText || '');
+}
+
+/** 分卷启用时给日志/卡片打上卷标记 */
+function activeVolumeLabel() {
+    if (!state.volumes.length) return '';
+    const volume = state.volumes[state.volumeIndex];
+    if (!volume) return '';
+    return `${volume.label}${volume.title ? `「${volume.title}」` : ''}`;
+}
+
+function previewSplit() {
+    const s = getSettings();
+    const text = String(state.rawText || '');
+    if (!text.trim()) {
+        toast('warn', '请先载入或粘贴小说文本');
+        return;
+    }
+
+    if (!s.splitEnabled) {
+        // 直接点预览就顺手把开关打开，省一次操作
+        s.splitEnabled = true;
+        putSettings();
+        const checkbox = $id('n2c-split-enabled');
+        if (checkbox) checkbox.checked = true;
+    }
+
+    const result = splitIntoVolumes(text, {
+        mode: s.splitMode,
+        volumeCount: Number(s.volumeCount),
+        charsPerVolume: Number(s.charsPerVolume),
+        byChapter: s.splitByChapter,
+    });
+
+    state.volumes = result.volumes;
+    state.volumeIndex = 0;
+    state.volumeWarnings = result.warnings;
+    // 分卷内容变了，之前切好的段作废
+    state.chunks = [];
+    state._chunkSource = '';
+
+    for (const warning of result.warnings) log(warning, 'warn');
+    if (!result.volumes.length) {
+        log('分卷失败：没有切出任何卷', 'error');
+        renderVolumeList();
+        return;
+    }
+
+    const chunkChars = Math.max(1500, Number(s.chunkChars) || 6000);
+    const scanTotal = result.volumes.reduce(
+        (sum, volume) => sum + estimateVolumeCost(volume.chars, chunkChars).scanRequests, 0);
+    const largest = Math.max(...result.volumes.map(volume => volume.chars));
+    const smallest = Math.min(...result.volumes.map(volume => volume.chars));
+
+    log(`分卷完成：共 ${result.volumes.length} 卷，识别到 ${result.chapters} 个章标题`);
+    log(`每卷 ${smallest.toLocaleString()}–${largest.toLocaleString()} 字；按 ${chunkChars} 字/段，全书扫描约 ${scanTotal} 次请求`);
+
+    renderVolumeList();
+    updateTextInfo();
+    toast('success', `已分成 ${result.volumes.length} 卷`);
+}
+
+function renderVolumeList() {
+    const host = $id('n2c-volume-list');
+    const info = $id('n2c-split-info');
+    const clearButton = $id('n2c-clear-split');
+    if (!host) return;
+
+    if (!state.volumes.length) {
+        host.innerHTML = '';
+        if (info) {
+            info.textContent = getSettings().splitEnabled
+                ? '已启用分卷但还没预览。点「预览分卷」查看切分结果。'
+                : '尚未分卷。分卷后「分析人物」「生成角色卡」只处理当前卷。';
+        }
+        if (clearButton) clearButton.style.display = 'none';
+        return;
+    }
+
+    const settings = getSettings();
+    const chunkChars = Math.max(1500, Number(settings.chunkChars) || 6000);
+    const totalChars = state.volumes.reduce((sum, volume) => sum + volume.chars, 0);
+
+    if (info) {
+        info.textContent = `共 ${state.volumes.length} 卷 / ${totalChars.toLocaleString()} 字。`
+            + '分析、生成都只作用于当前选中的卷——逐卷跑完再合并，比一次喂全书稳得多。';
+    }
+    if (clearButton) clearButton.style.display = '';
+
+    const rows = state.volumes.map((volume, index) => {
+        const cost = estimateVolumeCost(volume.chars, chunkChars);
+        const active = index === state.volumeIndex ? ' n2c-volume-active' : '';
+        const done = volume._done ? '<span class="n2c-volume-done">已出卡</span>' : '';
+        const cardCount = volume._cardCount ? `<span class="n2c-badge">${volume._cardCount} 张</span>` : '';
+        return `
+<div class="n2c-volume-row${active}" data-index="${index}">
+  <span class="n2c-volume-no">${index + 1}</span>
+  <span class="n2c-volume-title" title="${escapeHtml(volume.title)}">${escapeHtml(volume.title)}</span>
+  <span class="n2c-volume-meta">${volume.chars.toLocaleString()} 字 · 约 ${cost.scanRequests} 次扫描</span>
+  ${cardCount}${done}
+</div>`;
+    }).join('');
+
+    host.innerHTML = rows;
+
+    host.querySelectorAll('.n2c-volume-row').forEach(row => {
+        row.addEventListener('click', () => {
+            const index = Number(row.dataset.index);
+            if (index === state.volumeIndex) return;
+            switchVolume(index);
+        });
+    });
+}
+
+/** 切换当前卷：把已有结果清掉，避免上一卷的角色混进来 */
+function switchVolume(index) {
+    if (!state.volumes[index]) return;
+    if (state.running) {
+        toast('warn', '正在运行中，先等当前任务结束或点中止');
+        return;
+    }
+    state.volumeIndex = index;
+    state.chunks = [];
+    state._chunkSource = '';
+    state.characters = [];
+    state.entries = [];
+    renderCharacterList();
+    renderVolumeList();
+    updateTextInfo();
+    const volume = state.volumes[index];
+    log(`已切换到 ${volume.label}「${volume.title}」（${volume.chars.toLocaleString()} 字）`);
 }
 
 function estimateChunkCount(length) {
@@ -632,17 +896,18 @@ function buildModelClient() {
 async function runAnalyze() {
     if (state.running) return;
     const settings = getSettings();
-    const text = String(state.rawText || '').trim();
+    const text = activeText().trim();
     if (!text) {
         toast('warn', '请先载入或粘贴小说文本');
         return;
     }
 
+    const volumeLabel = activeVolumeLabel();
     const abort = new AbortController();
     state.abort = abort;
     setRunning(true);
     setProgress(2, '准备分段…');
-    log(`开始分析：${text.length.toLocaleString()} 字`);
+    log(`开始分析${volumeLabel ? ` ${volumeLabel}` : ''}：${text.length.toLocaleString()} 字`);
 
     try {
         await ensureChunks(text);
@@ -704,7 +969,7 @@ async function ensureChunks(text) {
 async function runGenerate() {
     if (state.running) return;
     const settings = getSettings();
-    const text = String(state.rawText || '').trim();
+    const text = activeText().trim();
     if (!text) {
         toast('warn', '请先载入或粘贴小说文本');
         return;
@@ -719,6 +984,7 @@ async function runGenerate() {
         return;
     }
 
+    const volumeLabel = activeVolumeLabel();
     const abort = new AbortController();
     state.abort = abort;
     setRunning(true);
@@ -728,6 +994,7 @@ async function runGenerate() {
 
     const callModel = buildModelClient();
     const sourceName = state.novelTitle || '未命名作品';
+    if (volumeLabel) log(`本次只处理 ${volumeLabel}`);
 
     try {
         await ensureChunks(text);
@@ -782,12 +1049,20 @@ async function runGenerate() {
             }
         }
 
+        // 记录本卷产出，供卷列表显示
+        const currentVolume = state.volumes[state.volumeIndex];
+        if (currentVolume) {
+            currentVolume._cardCount = (currentVolume._cardCount || 0) + state.profiles.length;
+            currentVolume._done = state.profiles.length > 0;
+            renderVolumeList();
+        }
+
         setProgress(100, `完成，共生成 ${state.profiles.length} 张角色卡`);
         if (!state.profiles.length) {
             toast('error', '没有生成出任何角色卡，看日志排查');
             return;
         }
-        toast('success', `生成完成，共 ${state.profiles.length} 张角色卡`);
+        toast('success', `${volumeLabel || ''}生成完成，共 ${state.profiles.length} 张角色卡`);
 
         if (settings.withWorldBook && settings.saveWorldBookFile && state.entries.length) {
             downloadWorldFile();
@@ -804,12 +1079,13 @@ async function runGenerate() {
 
 async function runWorldOnly() {
     if (state.running) return;
-    const text = String(state.rawText || '').trim();
+    const text = activeText().trim();
     if (!text) {
         toast('warn', '请先载入或粘贴小说文本');
         return;
     }
 
+    const volumeLabel = activeVolumeLabel();
     const abort = new AbortController();
     state.abort = abort;
     setRunning(true);
@@ -820,7 +1096,7 @@ async function runWorldOnly() {
         state.entries = await buildWorldEntries(callModel, abort.signal);
         setProgress(100, `完成，世界书 ${state.entries.length} 条`);
         downloadWorldFile();
-        toast('success', `世界书已导出，共 ${state.entries.length} 条`);
+        toast('success', `${volumeLabel || ''}世界书已导出，共 ${state.entries.length} 条`);
     } catch (error) {
         log(error.message, 'error');
         toast('error', error.message);
@@ -858,10 +1134,13 @@ function downloadWorldFile() {
         toast('warn', '还没有世界书条目');
         return;
     }
-    const name = `${safeFileName(state.novelTitle || '小说')}世界书`;
+    const volumeLabel = activeVolumeLabel();
+    // 分卷时文件名带卷号，避免多卷导出的世界书互相覆盖
+    const volumeSuffix = volumeLabel ? `（${volumeLabel.replace(/[「」]/g, '')}）` : '';
+    const name = `${safeFileName(state.novelTitle || '小说')}${volumeSuffix}世界书`;
     const data = buildWorldInfoData(state.entries, {
         name,
-        description: `由《${state.novelTitle || '未命名'}》自动提取，共 ${state.entries.length} 条`,
+        description: `由《${state.novelTitle || '未命名'}》${volumeLabel || ''}自动提取，共 ${state.entries.length} 条`,
     });
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     downloadBlob(blob, `${name}.json`);
@@ -884,11 +1163,14 @@ async function buildProfileCard(character, profile) {
         if (character.screen_time) tags.push(character.screen_time === 'high' ? '主角' : '');
     }
 
+    const volumeLabel = activeVolumeLabel();
+    const sourceLabel = volumeLabel ? `${volumeLabel}` : '';
+
     const meta = {
         creator: settings.creatorName || '小说转角色卡',
         version: settings.cardVersionTag || '1.0',
         source: state.novelTitle,
-        sources: state.novelTitle ? [state.novelTitle] : [],
+        sources: [state.novelTitle, sourceLabel].filter(Boolean),
         tags: tags.filter(Boolean),
     };
 
@@ -897,7 +1179,7 @@ async function buildProfileCard(character, profile) {
 
     // 世界书：内嵌副本按角色单独命名，避免多张卡共用一个书名互相覆盖
     if (settings.withWorldBook && settings.embedWorldBook && state.entries.length) {
-        const bookName = `${name}·${state.novelTitle || '小说'}世界书`;
+        const bookName = `${name}·${state.novelTitle || '小说'}${sourceLabel ? ` ${sourceLabel}` : ''}世界书`;
         const bookEntries = state.entries;
         cardV2.data.character_book = buildCharacterBook(bookEntries, { name: bookName });
         cardV3.data.character_book = buildCharacterBook(bookEntries, { name: bookName });

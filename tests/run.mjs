@@ -23,6 +23,7 @@ const png = await load('src/png-card.js');
 const cards = await load('src/card-builder.js');
 const world = await load('src/world-builder.js');
 const prompts = await load('src/prompts.js');
+const splits = await load('src/splits.js');
 
 let passed = 0;
 let failed = 0;
@@ -516,6 +517,194 @@ test('没有任何命中的角色返回空证据', () => {
 test('单字别名不会被当成命中依据（避免噪音）', () => {
     const chunks = ['梧字出现了很多次梧梧梧梧梧梧'];
     assert.equal(ai.collectEvidence(chunks, { name: '梧', aliases: [] }), '');
+});
+
+console.log('\n[6] 长篇小说分卷');
+
+/** 造一本有 n 章、每章约 bodyChars 字的小说 */
+function makeNovel(chapterCount, bodyChars, headingStyle = n => `第${n}章 试炼之始`) {
+    const parts = [];
+    for (let i = 1; i <= chapterCount; i++) {
+        const sentences = Math.ceil(bodyChars / 20);
+        const body = Array.from({ length: sentences }, (_, k) => `第${i}章第${k}句，剑光掠过山巅。`).join('');
+        parts.push(`${headingStyle(i)}\n${body}`);
+    }
+    return parts.join('\n\n');
+}
+
+test('识别中文常见章标题（第X章/回/节/卷/序章/番外）', () => {
+    const text = [
+        '第一章 开始',
+        '正文内容',
+        '第十二回 风起',
+        '正文',
+        '第3节 转折',
+        '正文',
+        '序章',
+        '正文',
+        '番外 后日谈',
+        '正文',
+        '卷二 江湖',
+    ].join('\n');
+    const titles = splits.detectChapterHeadings(text).map(h => h.title);
+    assert.equal(titles.length, 6, `实际识别到：${JSON.stringify(titles)}`);
+    assert.ok(titles.includes('第一章 开始'));
+    assert.ok(titles.includes('第十二回 风起'));
+    assert.ok(titles.includes('第3节 转折'));
+    assert.ok(titles.includes('序章'));
+    assert.ok(titles.includes('番外 后日谈'));
+    assert.ok(titles.includes('卷二 江湖'));
+});
+
+test('识别英文 Chapter 标题', () => {
+    const text = 'Chapter 1\nThe beginning\n正文\nChapter XII\nMore';
+    const titles = splits.detectChapterHeadings(text).map(h => h.title);
+    assert.deepEqual(titles, ['Chapter 1', 'Chapter XII']);
+});
+
+test('正文中间提到章节不算标题（常见误判）', () => {
+    const text = '他翻到第一章 开始那一页，若有所思。\n真正的正文开始了。';
+    assert.equal(splits.detectChapterHeadings(text).length, 0);
+});
+
+test('超长行不会被当成标题', () => {
+    const longLine = `第一章 ${'很'.repeat(80)}`;
+    assert.equal(splits.detectChapterHeadings(longLine).length, 0);
+});
+
+test('按章分卷：卷边界落在章标题上', () => {
+    const novel = makeNovel(10, 3000);
+    const result = splits.splitIntoVolumes(novel, { mode: 'auto', charsPerVolume: 12000, byChapter: true });
+    assert.ok(result.volumes.length >= 2, `卷数应大于 1，实际 ${result.volumes.length}`);
+    for (const volume of result.volumes) {
+        const head = volume.body.trimStart().slice(0, 6);
+        assert.ok(/^第[0-9]+章/.test(head), `第 ${volume.index + 1} 卷开头不是章标题：${head}`);
+    }
+});
+
+test('分卷不丢字也不重复', () => {
+    const novel = makeNovel(12, 2500);
+    const result = splits.splitIntoVolumes(novel, { mode: 'auto', charsPerVolume: 15000 });
+    const rejoined = result.volumes.map(v => v.body).join('');
+    assert.equal(rejoined, novel, '分卷后重新拼接必须与原文完全一致');
+    assert.equal(result.volumes.reduce((sum, v) => sum + v.chars, 0), novel.length);
+});
+
+test('每卷字数接近目标，不超过目标的 2.5 倍', () => {
+    const novel = makeNovel(20, 2000);
+    const target = 10000;
+    const result = splits.splitIntoVolumes(novel, { mode: 'auto', charsPerVolume: target });
+    for (const volume of result.volumes) {
+        assert.ok(volume.chars <= target * 2.5 + 200, `第 ${volume.index + 1} 卷 ${volume.chars} 字，超出容忍上限`);
+    }
+});
+
+test('指定卷数时按卷数平分', () => {
+    const novel = makeNovel(20, 2000); // 约 4 万字
+    const result = splits.splitIntoVolumes(novel, { mode: 'count', volumeCount: 4, byChapter: false });
+    assert.equal(result.volumes.length, 4);
+    // 切点对齐段落边界，允许偏离均值；只要没有哪一卷被压成零头即可
+    for (const volume of result.volumes) {
+        assert.ok(volume.chars >= novel.length / 4 * 0.5,
+            `第 ${volume.index + 1} 卷只有 ${volume.chars} 字，偏离均值过多`);
+    }
+    assert.equal(result.volumes.map(v => v.body).join(''), novel);
+});
+
+test('指定每卷字数时按字数切', () => {
+    const novel = makeNovel(20, 2000);
+    const result = splits.splitIntoVolumes(novel, { mode: 'size', charsPerVolume: 8000, byChapter: false });
+    assert.ok(result.volumes.length >= 4, `应切成至少 4 卷，实际 ${result.volumes.length}`);
+    // 为了切在段落边界上，允许显著超出目标，但不能超出目标的一倍
+    for (const volume of result.volumes) {
+        assert.ok(volume.chars <= 8000 * 2, `第 ${volume.index + 1} 卷 ${volume.chars} 字，超出目标过多`);
+    }
+    assert.equal(result.volumes.map(v => v.body).join(''), novel);
+});
+
+test('过小的尾卷会被并进前卷，不产生零头卷', () => {
+    // 每段 300 字、共 40 段 = 12000 字，目标 5000：天然会剩一个 2000 字的尾卷
+    const paragraphs = Array.from({ length: 40 }, (_, i) => `第${i}段：${'字'.repeat(296)}`);
+    const text = paragraphs.join('\n');
+    const result = splits.splitIntoVolumes(text, { mode: 'size', charsPerVolume: 5000, byChapter: false });
+    for (const volume of result.volumes) {
+        assert.ok(volume.chars >= 3000, `第 ${volume.index + 1} 卷只有 ${volume.chars} 字，应被并入前卷`);
+    }
+    assert.equal(result.volumes.map(v => v.body).join(''), text);
+});
+
+test('没有章标题的纯文本自动退回字数切分并给出提示', () => {
+    const plain = '剑光掠过山巅。'.repeat(3000); // 约 2.4 万字，无章标题
+    const result = splits.splitIntoVolumes(plain, { mode: 'auto', charsPerVolume: 10000 });
+    assert.ok(result.chapters < 3);
+    assert.ok(result.warnings.some(w => w.includes('无法按章分卷')), `应有降级提示：${JSON.stringify(result.warnings)}`);
+    assert.ok(result.volumes.length >= 2);
+    assert.equal(result.volumes.map(v => v.body).join(''), plain);
+});
+
+test('不按章分卷时不误报降级提示', () => {
+    const plain = '剑光掠过山巅。'.repeat(3000);
+    const result = splits.splitIntoVolumes(plain, { mode: 'size', charsPerVolume: 10000, byChapter: false });
+    assert.equal(result.warnings.length, 0, `不应有提示：${JSON.stringify(result.warnings)}`);
+});
+
+test('切分优先落在段落边界，不在句子中间', () => {
+    const paragraphs = Array.from({ length: 40 }, (_, i) => `第${i}段：${'字'.repeat(300)}`);
+    const text = paragraphs.join('\n');
+    const result = splits.splitIntoVolumes(text, { mode: 'size', charsPerVolume: 5000, byChapter: false });
+    // 除最后一卷外，每卷都应以换行结尾（即切在段边界）
+    for (const volume of result.volumes.slice(0, -1)) {
+        assert.ok(volume.body.endsWith('\n'), `第 ${volume.index + 1} 卷未切在段边界`);
+    }
+});
+
+test('单段超长时退化为硬切，且不丢字', () => {
+    const text = '剑'.repeat(30000);
+    const result = splits.splitIntoVolumes(text, { mode: 'size', charsPerVolume: 10000, byChapter: false });
+    assert.ok(result.volumes.length >= 3);
+    assert.equal(result.volumes.map(v => v.body).join(''), text);
+});
+
+test('单卷字数被绝对下限保护（防止手滑设成 100 字）', () => {
+    const novel = makeNovel(10, 3000);
+    const result = splits.splitIntoVolumes(novel, { mode: 'size', charsPerVolume: 100, byChapter: false });
+    assert.ok(result.warnings.some(w => w.includes('过小')), `应有下限提示：${JSON.stringify(result.warnings)}`);
+    // 下限是 1000 字，不是把目标抬到上万——否则用户指定的分卷设置会失效
+    for (const volume of result.volumes) {
+        assert.ok(volume.chars <= 1000 * 2, `第 ${volume.index + 1} 卷 ${volume.chars} 字，超出下限过多`);
+    }
+    assert.equal(result.volumes.map(v => v.body).join(''), novel);
+});
+
+test('用户指定的目标字数会被真正尊重（不被内部下限悄悄抬高）', () => {
+    const novel = makeNovel(20, 2000); // 约 3.1 万字
+    const small = splits.splitIntoVolumes(novel, { mode: 'size', charsPerVolume: 3000, byChapter: false });
+    const large = splits.splitIntoVolumes(novel, { mode: 'size', charsPerVolume: 12000, byChapter: false });
+    assert.ok(small.volumes.length > large.volumes.length,
+        `目标 3000 应比目标 12000 切出更多卷，实际 ${small.volumes.length} vs ${large.volumes.length}`);
+    assert.ok(small.volumes.length >= 8, `目标 3000 应至少 8 卷，实际 ${small.volumes.length}`);
+    assert.ok(large.volumes.length <= 3, `目标 12000 应不超过 3 卷，实际 ${large.volumes.length}`);
+});
+
+test('空文本返回空卷而不是抛错', () => {
+    const result = splits.splitIntoVolumes('', {});
+    assert.deepEqual(result.volumes, []);
+    assert.equal(result.totalChars, 0);
+    assert.ok(result.warnings.length > 0);
+});
+
+test('CRLF 与多余空行被归一化', () => {
+    const text = '第一章 甲\r\n\r\n\r\n正文一\r\n\r\n第二章 乙\r\n正文二';
+    const result = splits.splitIntoVolumes(text, { mode: 'size', charsPerVolume: 10000, byChapter: false });
+    assert.equal(result.volumes.map(v => v.body).join(''), text.replace(/\r\n?/g, '\n').replace(/\n{3,}/g, '\n\n'));
+    assert.equal(result.volumes[0].body.includes('\r'), false);
+});
+
+test('成本预估与卷字数一致', () => {
+    const cost = splits.estimateVolumeCost(60000, 6000);
+    assert.equal(cost.scanRequests, 10);
+    assert.equal(cost.inputTokens, 40000);
+    assert.equal(splits.estimateVolumeCost(1, 6000).scanRequests, 1, '极短文本也至少 1 次请求');
 });
 
 console.log(`\n结果：${passed} 通过，${failed} 失败\n`);
