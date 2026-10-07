@@ -376,6 +376,17 @@
     gap: 4px;
 }
 
+#n2c-panel .n2c-disabled-badge {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    opacity: 0.75;
+    background: rgba(192, 57, 43, 0.18);
+    border: 0.5px solid rgba(192, 57, 43, 0.4);
+    color: #c0392b;
+    white-space: nowrap;
+}
+
 #n2c-panel.n2c-off .n2c-body {
     opacity: 0.42;
     filter: grayscale(0.6);

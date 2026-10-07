@@ -245,6 +245,7 @@ function renderPanelHtml() {
       <div class="menu_button n2c-small" id="n2c-open-window" title="在独立浮动窗口中打开">
         <i class="fa-solid fa-up-right-and-down-left-from-center"></i> 独立窗口
       </div>
+      <span class="n2c-disabled-badge" id="n2c-disabled-badge" style="${s.pluginEnabled ? 'display:none' : ''}">已关闭（顶栏入口已隐藏）</span>
       <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
     </div>
   </div>
@@ -678,19 +679,36 @@ function mountTopbarDrawer() {
     });
 }
 
-/** 主开关：关掉后面板置灰、按钮不响应 */
+/**
+ * 主开关：关掉后面板置灰、按钮不响应，顶栏入口整块消失。
+ *
+ * 顶栏隐藏的是整个 drawer 容器而不是里面的图标——酒馆的 drawer 结构里
+ * 图标外面还包着 .drawer-toggle，只藏图标会在顶栏留一块空白占位。
+ * 不做 remove()：重新启用时直接去掉 display 就能恢复，且不用重绑事件。
+ */
 function applyEnabledState() {
     const s = getSettings();
+    const enabled = s.pluginEnabled !== false;
+
     const panel = $id('n2c-panel');
-    if (panel) panel.classList.toggle('n2c-off', !s.pluginEnabled);
+    if (panel) panel.classList.toggle('n2c-off', !enabled);
+
+    const drawer = $id('n2c-drawer');
+    if (drawer) drawer.style.display = enabled ? '' : 'none';
+
     const drawerIcon = $id('n2c-drawer-icon');
     if (drawerIcon) {
-        drawerIcon.classList.toggle('n2c-icon-off', !s.pluginEnabled);
-        drawerIcon.title = s.pluginEnabled
+        drawerIcon.classList.toggle('n2c-icon-off', !enabled);
+        drawerIcon.title = enabled
             ? '小说转角色卡：把小说正文提取成角色卡'
             : '小说转角色卡（已关闭）';
     }
-    if (!s.pluginEnabled && state.winEl) closeFloatingWindow();
+
+    const badge = $id('n2c-disabled-badge');
+    if (badge) badge.style.display = enabled ? 'none' : '';
+
+    // 关闭时顺手把浮窗收掉，避免留一个不能操作的窗口
+    if (!enabled && state.winEl) closeFloatingWindow();
 }
 
 function isPluginEnabled() {

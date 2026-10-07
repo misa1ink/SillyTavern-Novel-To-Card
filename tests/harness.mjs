@@ -110,6 +110,25 @@ class FakeElement {
         unregisterTree(child);
         return child;
     }
+    insertBefore(node, reference) {
+        const index = reference ? this.children.indexOf(reference) : -1;
+        if (node.parentNode) node.parentNode.removeChild(node);
+        node.parentNode = this;
+        if (index >= 0) this.children.splice(index, 0, node);
+        else this.children.push(node);
+        registerTree(node);
+        return node;
+    }
+    /** 只支持逗号分隔的简单选择器（.class / #id / tag），够 harness 用 */
+    closest(selector) {
+        const parts = String(selector).split(',').map(item => item.trim()).filter(Boolean);
+        let node = this;
+        while (node) {
+            if (parts.some(part => matches(node, part))) return node;
+            node = node.parentNode;
+        }
+        return null;
+    }
     remove() {
         if (this.parentNode) this.parentNode.removeChild(this);
         else unregisterTree(this);
@@ -153,14 +172,15 @@ class FakeElement {
     }
 }
 
+/** 支持 .a.b / #id / tag 三种简单选择器（含复合类名） */
 function matches(element, selector) {
-    if (selector.startsWith('.')) {
-        return element.classList.contains(selector.slice(1));
+    const text = String(selector).trim();
+    if (text.startsWith('#')) return element.id === text.slice(1);
+    if (text.startsWith('.')) {
+        const classes = text.slice(1).split('.').filter(Boolean);
+        return classes.every(cls => element.classList.contains(cls));
     }
-    if (selector.startsWith('#')) {
-        return element.id === selector.slice(1);
-    }
-    return element.tagName === selector.toUpperCase();
+    return element.tagName === text.toUpperCase();
 }
 
 const registry = new Map();
@@ -218,8 +238,11 @@ function parseHtml(html) {
 
 function query(selector) {
     const text = String(selector);
-    if (text.startsWith('#')) return registry.get(text.slice(1)) || null;
-    return null;
+    // 先走 id 快捷路径（面板控件都是按 id 查的）
+    const byId = text.startsWith('#') ? registry.get(text.slice(1)) : null;
+    if (byId) return byId;
+    // 其余选择器在文档树里真实遍历
+    return documentStub.body.querySelector(selector);
 }
 
 const documentStub = {
@@ -239,6 +262,17 @@ for (const id of ['extensions_settings', 'extensions_menu', 'extensionsMenu', 'o
     element.id = id;
     documentStub.body.appendChild(element);
 }
+
+// 模拟酒馆顶栏里的「扩展」抽屉按钮，扩展会把自己的入口插在它前面
+const cubesDrawer = new FakeElement('div');
+cubesDrawer.className = 'drawer';
+const cubesToggle = new FakeElement('div');
+cubesToggle.className = 'drawer-toggle';
+const cubesIcon = new FakeElement('div');
+cubesIcon.className = 'drawer-icon fa-solid fa-cubes';
+cubesToggle.appendChild(cubesIcon);
+cubesDrawer.appendChild(cubesToggle);
+documentStub.body.appendChild(cubesDrawer);
 
 const windowStub = {
     document: documentStub,
@@ -461,6 +495,49 @@ try {
         if (JSON.stringify(usage) !== before) throw new Error('关闭状态下仍然产生了副作用');
         toggle.checked = true;
         toggle.dispatch('change');
+    });
+
+    check('顶栏入口被挂载到扩展按钮前面', () => {
+        const drawer = registry.get('n2c-drawer');
+        if (!drawer) throw new Error('顶栏入口没有被创建');
+        if (drawer.parentNode !== documentStub.body) throw new Error('顶栏入口没挂在顶栏上');
+        const siblings = documentStub.body.children;
+        const mine = siblings.indexOf(drawer);
+        const cubes = siblings.indexOf(cubesDrawer);
+        if (mine < 0 || cubes < 0) throw new Error('找不到入口或扩展按钮');
+        if (mine !== cubes - 1) throw new Error('入口没有插在扩展按钮前面');
+    });
+
+    check('关闭插件时顶栏入口整块消失，重新启用后恢复', () => {
+        const toggle = registry.get('n2c-plugin-enabled');
+        const drawer = registry.get('n2c-drawer');
+        if (!toggle || !drawer) throw new Error('缺少主开关或顶栏入口');
+
+        toggle.checked = false;
+        toggle.dispatch('change');
+        if (drawer.style.display !== 'none') {
+            throw new Error(`关闭后顶栏入口没有隐藏（display=${JSON.stringify(drawer.style.display)}）`);
+        }
+        const icon = registry.get('n2c-drawer-icon');
+        if (icon && !icon.title.includes('已关闭')) throw new Error('图标标题没有反映关闭状态');
+
+        toggle.checked = true;
+        toggle.dispatch('change');
+        if (drawer.style.display === 'none') throw new Error('重新启用后顶栏入口没有恢复显示');
+    });
+
+    check('关闭时会显示「已关闭」标记，启用后隐藏', () => {
+        const toggle = registry.get('n2c-plugin-enabled');
+        const badge = registry.get('n2c-disabled-badge');
+        if (!badge) throw new Error('找不到已关闭标记');
+
+        toggle.checked = false;
+        toggle.dispatch('change');
+        if (badge.style.display === 'none') throw new Error('关闭后标记没有显示');
+
+        toggle.checked = true;
+        toggle.dispatch('change');
+        if (badge.style.display !== 'none') throw new Error('启用后标记没有隐藏');
     });
 
     check('打开独立窗口会把面板主体搬进窗口', () => {
