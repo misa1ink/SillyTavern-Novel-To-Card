@@ -836,11 +836,19 @@ try {
 
     check('剧情页的控件都渲染出来了', () => {
         const panel = registry.get('n2c-panel');
-        for (const id of ['n2c-story-build', 'n2c-story-start', 'n2c-story-stop', 'n2c-story-active',
-            'n2c-story-nodes', 'n2c-story-player', 'n2c-story-opening', 'n2c-story-progress']) {
+        for (const id of ['n2c-story-file', 'n2c-story-title', 'n2c-story-player', 'n2c-make-card',
+            'n2c-story-active', 'n2c-story-progress', 'n2c-story-opening',
+            'n2c-story-nodes', 'n2c-story-depth', 'n2c-story-redownload', 'n2c-import-card']) {
             const element = registry.get(id);
             if (!element) throw new Error(`缺少控件 ${id}`);
             if (!panel.contains(element)) throw new Error(`控件 ${id} 不在面板 DOM 树里`);
+        }
+    });
+
+    check('去掉了一键自动导入：默认开关是关的', () => {
+        const config = extensionSettingsStub['novel_to_card'];
+        if (config.importToTavern !== false) {
+            throw new Error(`默认不应自动导入，实际 importToTavern=${config.importToTavern}`);
         }
     });
 

@@ -92,6 +92,8 @@ import {
     applyVariableChanges,
     buildStoryWorldInfo,
     summarizeProgress,
+    buildScriptPayload,
+    readScriptPayload,
 } from './src/story-engine.js';
 
 const MODULE_NAME = 'novel_to_card';
@@ -107,7 +109,8 @@ const DEFAULT_SETTINGS = Object.freeze({
     worldEntryCount: 12,
     embedWorldBook: true,
     saveWorldBookFile: true,
-    importToTavern: true,
+    // 默认不自动导入：生成的卡只下载到本地，由用户自己决定要不要进角色栏
+    importToTavern: false,
     avatarMaxSize: 512,
     resizeAvatar: false,
     placeholderAvatar: true,
@@ -198,6 +201,13 @@ function getSettings() {
     const saved = extension_settings[MODULE_NAME];
     for (const key of Object.keys(DEFAULT_SETTINGS)) {
         if (saved[key] === undefined) saved[key] = DEFAULT_SETTINGS[key];
+    }
+    // 迁移：早期版本默认自动导入，会把卡直接塞进角色栏。
+    // 只纠正"从没动过这个开关"的老配置，用户自己改过的保持原样。
+    if (saved._importDefaultOffV1 !== true) {
+        if (saved.importToTavern === true) saved.importToTavern = false;
+        saved._importDefaultOffV1 = true;
+        saveSettingsDebounced();
     }
     return saved;
 }
@@ -388,44 +398,70 @@ function renderTabStory(s) {
 <div class="n2c-pane" data-pane="story">
 
   <div class="n2c-card">
-    <div class="n2c-card-head"><i class="fa-solid fa-dice-d20"></i> 生成剧情脚本</div>
+    <div class="n2c-card-head"><i class="fa-solid fa-file-image"></i> 生成可玩角色卡</div>
+    <div class="n2c-row">
+      <label class="n2c-file-btn menu_button n2c-small"><i class="fa-solid fa-file-import"></i> 选择小说文件
+        <input type="file" id="n2c-story-file" accept=".txt,.md,.jsonl,.text,text/plain" hidden></label>
+      <span class="n2c-hint-inline" id="n2c-story-source">未载入小说，也可以到「转换」页粘贴正文</span>
+    </div>
     <div class="n2c-grid">
+      <label class="n2c-field"><span>作品名（可选）</span>
+        <input type="text" id="n2c-story-title" class="text_pole" placeholder="书名" value="${escapeHtml(s.novelTitle || '')}"></label>
       <label class="n2c-field"><span>玩家扮演谁（留空由模型判断）</span>
         <input type="text" id="n2c-story-player" class="text_pole" placeholder="如：沈青梧" value="${escapeHtml(s.storyPlayerName)}"></label>
-      <label class="n2c-field"><span>切成几段</span>
-        <input type="number" id="n2c-story-nodes" class="text_pole" min="3" max="40" step="1" value="${s.storyNodeCount}"></label>
     </div>
-    <div class="n2c-field n2c-field-wide"><span>文风要求（可选，写给开场白）</span>
-      <input type="text" id="n2c-story-style" class="text_pole" placeholder="如：冷硬写实，短句，少形容词" value="${escapeHtml(s.storyStyle)}"></div>
     <div class="n2c-row">
-      <div class="menu_button n2c-primary" id="n2c-story-build"><i class="fa-solid fa-book-open-reader"></i> 生成剧情脚本</div>
-      <div class="menu_button n2c-small" id="n2c-story-worldbook"><i class="fa-solid fa-book-atlas"></i> 导出为世界书</div>
-      <div class="menu_button n2c-small" id="n2c-story-card"><i class="fa-solid fa-id-card"></i> 生成玩家角色卡</div>
+      <div class="menu_button n2c-primary n2c-big" id="n2c-make-card">
+        <i class="fa-solid fa-wand-magic-sparkles"></i> 分析小说并生成角色卡
+      </div>
     </div>
-    <div class="n2c-hint">脚本按当前页/卷的文本生成。源文本在「转换」页载入；分卷后生成的就是当前卷的剧情。</div>
+    <div class="n2c-hint">
+      产出<b>一张 PNG</b>：里面装着玩家角色、剧情世界书、状态变量和整份剧情脚本。
+      下载到本地，<b>不会自动进入你的角色列表</b>——想用的时候拖进酒馆，或点下方「导入到角色列表」。
+    </div>
+    <div class="n2c-progress"><div class="n2c-progress-bar" id="n2c-progress-bar"></div></div>
+    <div class="n2c-hint" id="n2c-progress-text"></div>
   </div>
 
   <div class="n2c-card">
-    <div class="n2c-card-head">
-      <i class="fa-solid fa-gamepad"></i> 游玩控制
-      <label class="checkbox_label n2c-head-check" title="开启后每回合自动把当前剧情段注入对话">
-        <input type="checkbox" id="n2c-story-active" ${s.storyActive ? 'checked' : ''}><span>注入剧情</span>
-      </label>
-    </div>
+    <div class="n2c-card-head"><i class="fa-solid fa-gamepad"></i> 继续游玩</div>
     <div class="n2c-row">
-      <div class="menu_button n2c-primary n2c-small" id="n2c-story-start"><i class="fa-solid fa-play"></i> 开始游玩</div>
-      <div class="menu_button n2c-small" id="n2c-story-stop" style="display:none"><i class="fa-solid fa-stop"></i> 停止注入</div>
+      <label class="n2c-file-btn menu_button n2c-small"><i class="fa-solid fa-file-shield"></i> 读取角色卡 PNG
+        <input type="file" id="n2c-card-file" accept=".png,image/png" hidden></label>
+      <div class="menu_button n2c-small" id="n2c-import-card"><i class="fa-solid fa-file-import"></i> 导入到角色列表</div>
     </div>
+    <div class="n2c-hint">读入扩展自己生成的卡时，会连剧情脚本和变量一起恢复，接着演下去。</div>
     <div id="n2c-story-progress" class="n2c-story-progress"></div>
     <div class="n2c-checks">
-      <label class="checkbox_label"><input type="checkbox" id="n2c-story-auto-advance" ${s.storyAutoAdvance ? 'checked' : ''}><span>模型说演完就自动推进</span></label>
+      <label class="checkbox_label" title="开启后每回合自动把当前剧情段注入对话">
+        <input type="checkbox" id="n2c-story-active" ${s.storyActive ? 'checked' : ''}><span>注入剧情</span></label>
+      <label class="checkbox_label"><input type="checkbox" id="n2c-story-auto-advance" ${s.storyAutoAdvance ? 'checked' : ''}><span>演完自动推进</span></label>
       <label class="checkbox_label"><input type="checkbox" id="n2c-story-auto-report" ${s.storyAutoReport !== false ? 'checked' : ''}><span>自动读回状态变化</span></label>
     </div>
-    <div class="n2c-grid">
-      <label class="n2c-field"><span>注入深度（越小越靠后）</span>
-        <input type="number" id="n2c-story-depth" class="text_pole" min="0" max="30" step="1" value="${s.storyInjectDepth}"></label>
-    </div>
     <div class="n2c-hint">注入只在本地生效：不改角色卡、不写聊天记录，关掉开关就恢复原样。进度按聊天分别保存。</div>
+  </div>
+
+  <div class="n2c-card">
+    <div class="inline-drawer n2c-subdrawer">
+      <div class="inline-drawer-toggle inline-drawer-header">
+        <b>高级选项</b>
+        <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
+      </div>
+      <div class="inline-drawer-content">
+        <div class="n2c-grid">
+          <label class="n2c-field"><span>切成几段剧情</span>
+            <input type="number" id="n2c-story-nodes" class="text_pole" min="3" max="40" step="1" value="${s.storyNodeCount}"></label>
+          <label class="n2c-field"><span>注入深度（越小越靠后）</span>
+            <input type="number" id="n2c-story-depth" class="text_pole" min="0" max="30" step="1" value="${s.storyInjectDepth}"></label>
+        </div>
+        <div class="n2c-field n2c-field-wide"><span>文风要求（写给开场白）</span>
+          <input type="text" id="n2c-story-style" class="text_pole" placeholder="如：冷硬写实，短句，少形容词" value="${escapeHtml(s.storyStyle)}"></div>
+        <div class="n2c-row">
+          <div class="menu_button n2c-small" id="n2c-story-redownload"><i class="fa-solid fa-download"></i> 重新下载角色卡</div>
+          <div class="menu_button n2c-small" id="n2c-story-worldbook"><i class="fa-solid fa-book-atlas"></i> 导出剧情世界书</div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <div class="n2c-card">
@@ -585,8 +621,7 @@ function renderTabSettings(s) {
       </div>
     </div>
     <div class="n2c-row">
-      <div class="menu_button n2c-small" id="n2c-read-card"><i class="fa-solid fa-file-shield"></i> 读取已有角色卡 PNG 作为底图</div>
-      <input type="file" id="n2c-card-file" accept=".png,image/png" hidden>
+      <div class="menu_button n2c-small" id="n2c-read-card"><i class="fa-solid fa-file-shield"></i> 读取角色卡 PNG</div>
     </div>
   </div>
 
@@ -1049,7 +1084,14 @@ function bindPanelEvents() {
         if (box) box.innerHTML = '';
     });
 
-    $id('n2c-read-card')?.addEventListener('click', () => $id('n2c-card-file')?.click());
+    $id('n2c-read-card')?.addEventListener('click', () => {
+        const input = $id('n2c-card-file');
+        if (!input) {
+            toast('warn', '请到「剧情」页用「读取角色卡 PNG」');
+            return;
+        }
+        input.click();
+    });
     $id('n2c-card-file')?.addEventListener('change', async event => {
         const file = event.target.files?.[0];
         event.target.value = '';
@@ -1062,8 +1104,30 @@ function bindPanelEvents() {
                 return;
             }
             const data = card.data || card;
-            log(`读取到角色卡：${data.name || '未命名'}（规范 ${card.spec || '未知'}）`);
-            toast('success', `读到「${data.name || '未命名'}」，已把底图设为导出头像`);
+            const script = readScriptFromCard(card);
+            log(`读取到角色卡：${data.name || '未命名'}（规范 ${card.spec || '未知'}）`
+                + `${script ? '，并识别出内嵌的剧情脚本' : ''}`);
+
+            if (script) {
+                // 认出自家的卡：把剧本、变量与开场白一起恢复，接着就能继续玩
+                state.playbook = script.playbook;
+                state.storyOpening = script.opening || '';
+                state.runtime = createRuntimeState(script.playbook);
+                state.storyActive = false;
+                if (!state.novelTitle && script.novelTitle) state.novelTitle = script.novelTitle;
+                persistStoryToSettings();
+                saveRuntimeToChat();
+                renderStoryProgress();
+                renderStoryOpening();
+                const activeBox = $id('n2c-story-active');
+                if (activeBox) activeBox.checked = false;
+
+                toast('success', `已读回剧情：${script.playbook.stages.length} 段，玩家扮演「${script.playbook.player?.name || '主角'}」`);
+                log(`已从卡里恢复剧情：${script.playbook.stages.length} 段、${script.playbook.variables?.length || 0} 个变量`);
+            } else {
+                toast('success', `读到「${data.name || '未命名'}」，已把底图设为导出头像`);
+            }
+
             state.darkImage = bytes;
             state.darkImageName = file.name;
             const info = $id('n2c-avatar-info');
@@ -1209,12 +1273,38 @@ function bindPanelEvents() {
     };
     bindStoryText('n2c-story-player', 'storyPlayerName');
     bindStoryText('n2c-story-style', 'storyStyle');
+    bindStoryText('n2c-story-title', 'novelTitle');
 
-    $id('n2c-story-build')?.addEventListener('click', () => runStoryBuild());
+    // 剧情页自带的文件入口：不必先去「转换」页
+    $id('n2c-story-file')?.addEventListener('change', async event => {
+        const file = event.target.files?.[0];
+        event.target.value = '';
+        if (!file) return;
+        try {
+            const text = await readFileAsText(file);
+            state.rawText = text;
+            clearChunkCache();
+            if (!state.novelTitle) {
+                state.novelTitle = file.name.replace(/\.[^.]+$/, '');
+                const titleInput = $id('n2c-story-title');
+                if (titleInput) titleInput.value = state.novelTitle;
+                const mainTitle = $id('n2c-title');
+                if (mainTitle) mainTitle.value = state.novelTitle;
+            }
+            const textarea = $id('n2c-text');
+            if (textarea) textarea.value = text.length > 200_000 ? text.slice(0, 200_000) : text;
+            updateTextInfo();
+            updateStorySourceInfo();
+            log(`已载入《${file.name}》，${text.length.toLocaleString()} 字`);
+        } catch (error) {
+            toast('error', `读取文件失败：${error.message}`);
+        }
+    });
+
+    $id('n2c-make-card')?.addEventListener('click', () => runPlayableCard());
+    $id('n2c-story-redownload')?.addEventListener('click', () => redownloadPlayableCard());
     $id('n2c-story-worldbook')?.addEventListener('click', () => downloadStoryWorldBook());
-    $id('n2c-story-card')?.addEventListener('click', () => createPlayerCard());
-    $id('n2c-story-start')?.addEventListener('click', () => startStory());
-    $id('n2c-story-stop')?.addEventListener('click', () => stopStory());
+    $id('n2c-import-card')?.addEventListener('click', () => importCurrentPlayableCard());
 
     // 「注入剧情」开关直接对应运行时开关
     $id('n2c-story-active')?.addEventListener('change', event => {
@@ -1883,7 +1973,6 @@ function restoreStoryFromSettings() {
 
     const checkbox = $id('n2c-story-active');
     if (checkbox) checkbox.checked = state.storyActive;
-    updateStoryButtonState();
 
     log(`已恢复剧情脚本：${state.playbook.stages.length} 段，玩家扮演「${state.playbook.player?.name || '主角'}」`);
 }
@@ -2124,8 +2213,6 @@ async function startStory() {
     renderStoryProgress();
     log(`已开启剧情注入：当前第 ${state.runtime.stageIndex + 1} 段「${currentStage(state.playbook, state.runtime)?.title}」`);
     toast('success', '剧情注入已开启，现在开始聊天就会按节点推进');
-
-    updateStoryButtonState();
 }
 
 function stopStory() {
@@ -2135,15 +2222,7 @@ function stopStory() {
     persistStoryToSettings();
     clearStoryInjection(null);
     renderStoryProgress();
-    updateStoryButtonState();
     log('已关闭剧情注入');
-}
-
-function updateStoryButtonState() {
-    const start = $id('n2c-story-start');
-    const stop = $id('n2c-story-stop');
-    if (start) start.style.display = isStoryPlaying() ? 'none' : '';
-    if (stop) stop.style.display = isStoryPlaying() ? '' : 'none';
 }
 
 function renderStoryProgress() {
@@ -2151,8 +2230,7 @@ function renderStoryProgress() {
     if (!host) return;
 
     if (!state.playbook?.stages?.length) {
-        host.innerHTML = '<div class="n2c-hint">还没有剧情脚本。到本页上方生成，或在「转换」页先分卷再生成。</div>';
-        updateStoryButtonState();
+        host.innerHTML = '<div class="n2c-hint">还没有剧情脚本。点上方「分析小说并生成角色卡」即可。</div>';
         return;
     }
 
@@ -2204,8 +2282,6 @@ ${variableRows ? `<div class="n2c-label n2c-label-gap">追踪变量</div><div cl
             saveRuntimeToChat();
         });
     });
-
-    updateStoryButtonState();
 }
 
 /** 把当前节点写进聊天输入框，方便手动补一段环境描写或直接演 */
@@ -2222,8 +2298,13 @@ function insertStageToInput(stage) {
     toast('success', '已把本段背景写进输入框');
 }
 
-/** 生成剧情脚本 */
+/** 生成剧情脚本（已被 runPlayableCard 取代：那条路会直接把卡打包出来） */
 async function runStoryBuild() {
+    // 只出脚本不出卡的老路径，界面已不再调用。保留函数体以免误用：
+    // 引导到会打包成一张 PNG 的主流程。
+    toast('warn', '请用「分析小说并生成角色卡」，它会一次性产出角色卡');
+    return;
+    /* eslint-disable no-unreachable */
     if (state.running) return;
     if (!requireEnabled()) return;
 
@@ -2307,7 +2388,7 @@ function renderStoryOpening() {
     const host = $id('n2c-story-opening');
     if (!host) return;
     if (!state.storyOpening) {
-        host.innerHTML = '<div class="n2c-hint">还没有开场白。生成剧情脚本时会一起产出。</div>';
+        host.innerHTML = '<div class="n2c-hint">还没有开场白。生成角色卡时会一起产出。</div>';
         return;
     }
     host.innerHTML = `
@@ -2337,79 +2418,262 @@ function downloadStoryWorldBook() {
     log(`已导出剧情世界书：${name}.json（${state.playbook.stages.length} 段）`);
 }
 
-/** 用剧本生成一张"玩家角色卡"，导入后即可直接开玩 */
-async function createPlayerCard() {
-    if (!state.playbook?.stages?.length) {
-        toast('warn', '还没有剧情脚本');
-        return;
-    }
-    if (!requireEnabled()) return;
+/** 卡里嵌剧本用的字段名 */
+const CARD_SCRIPT_KEY = 'novel_to_card';
 
+/**
+ * 造一张**自包含**的可玩角色卡：一张 PNG 里同时装着
+ *   角色（玩家扮演的人物）+ 世界书（剧情节点）+ 变量（含初值）+ 剧情脚本本体。
+ *
+ * 脚本本体以 JSON 塞进 card.extensions[CARD_SCRIPT_KEY]，
+ * 重新导入这张卡时能原样读回，所以"卡在，游玩进度就能被识别"。
+ * 不依赖本扩展的人也能用：世界书条目会作为 character_book 一起导入。
+ */
+async function buildPlayableCard({ openingText } = {}) {
     const playbook = state.playbook;
-    const player = playbook.player || {};
-    const stage = playbook.stages[0];
-    const name = player.name || '主角';
+    if (!playbook?.stages?.length) throw new Error('还没有剧情脚本');
+
     const settings = getSettings();
+    const player = playbook.player || {};
+    const name = normalizeName(player.name) || '主角';
+    const firstStage = playbook.stages[0];
+    const opening = openingText || state.storyOpening || firstStage?.situation || '';
+
+    // 角色描述：让卡在"没有本扩展"的环境下也大致可玩
+    const description = [
+        `【你在扮演】${name}`,
+        player.identity ? `身份：${player.identity}` : '',
+        player.goal ? `当前目标：${player.goal}` : '',
+        player.items?.length ? `持有：${player.items.join('、')}` : '',
+        player.relationships ? `人物关系：${player.relationships}` : '',
+        '',
+        `【剧情起始】${firstStage?.location ? `地点：${firstStage.location}。` : ''}${firstStage?.situation || ''}`,
+        firstStage?.objective ? `需要应对：${firstStage.objective}` : '',
+        '',
+        '【玩法】这是从原著改编的互动剧情。你会一段一段地经历它，'
+        + '不必急着推进，先把眼前的局面演好；你的选择会改变事情的走向。',
+    ].filter(Boolean).join('\n');
+
+    const personality = [
+        playbook.variables?.length
+            ? `追踪状态：${playbook.variables.map(item => `${item.name}（初始 ${item.type === 'bool' ? (item.initial ? '是' : '否') : item.initial}）`).join('、')}`
+            : '',
+        playbook.stages.length ? `剧情共 ${playbook.stages.length} 段` : '',
+    ].filter(Boolean).join('\n');
 
     const profile = {
         name,
         role: player.identity || '剧情主角',
-        summary: `${state.novelTitle || '小说'} 的互动剧情主角。${player.goal || ''}`,
-        personality: player.relationships || '',
-        scenario: stage?.situation || '',
-        world_context: `由《${state.novelTitle || '未命名'}》拆出的 ${playbook.stages.length} 段互动剧情。`,
-        first_mes: state.storyOpening || stage?.situation || '',
+        summary: `${state.novelTitle || '小说'} 改编的互动剧情主角。`,
+        description,
+        personality,
+        scenario: firstStage?.situation || '',
+        first_mes: opening,
         example_dialogue: [],
+        world_context: `由《${state.novelTitle || '未命名'}》拆出的 ${playbook.stages.length} 段互动剧情。`,
     };
+
+    const scriptPayload = buildScriptPayload(playbook, {
+        novelTitle: state.novelTitle,
+        opening,
+    });
 
     const meta = {
         creator: settings.creatorName || '小说转角色卡',
         version: settings.cardVersionTag || '1.0',
         source: state.novelTitle,
         sources: [state.novelTitle].filter(Boolean),
-        tags: ['剧情脚本', '可游玩'],
+        tags: ['互动剧情', '可游玩'],
     };
 
-    try {
-        const cardV2 = buildCardV2(profile, meta);
-        const cardV3 = buildCardV3(profile, meta);
+    const cardV2 = buildCardV2(profile, meta);
+    const cardV3 = buildCardV3(profile, meta);
+    cardV2.data.extensions[CARD_SCRIPT_KEY] = scriptPayload;
+    cardV3.data.extensions[CARD_SCRIPT_KEY] = scriptPayload;
+    // 世界书：剧情节点 + 玩家设定
+    const storyBook = buildStoryWorldInfo({
+        playbook,
+        novelTitle: state.novelTitle,
+        buildWorldInfoData,
+    });
+    const bookEntries = Object.values(storyBook.entries || {}).map(entry => ({
+        comment: entry.comment,
+        keys: entry.key,
+        content: entry.content,
+        category: entry.group || '剧情节点',
+        constant: entry.constant,
+    }));
+    const bookName = `${name}·${state.novelTitle || '小说'}剧情`;
+    cardV2.data.character_book = buildCharacterBook(bookEntries, { name: bookName });
+    cardV3.data.character_book = buildCharacterBook(bookEntries, { name: bookName });
 
-        // 把剧情节点作为 character_book 内嵌，导入即自带世界书
-        const storyBook = buildStoryWorldInfo({
-            playbook,
-            novelTitle: state.novelTitle,
-            buildWorldInfoData,
-        });
-        const bookEntries = Object.values(storyBook.entries || {}).map(entry => ({
-            comment: entry.comment,
-            keys: entry.key,
-            content: entry.content,
-            category: entry.group || '剧情节点',
-            constant: entry.constant,
-        }));
-        const bookName = `${name}·${state.novelTitle || '小说'}剧情`;
-        cardV2.data.character_book = buildCharacterBook(bookEntries, { name: bookName });
-        cardV3.data.character_book = buildCharacterBook(bookEntries, { name: bookName });
-
-        const basePng = await generatePlaceholderPng(name, { size: Number(settings.avatarMaxSize) || 512 });
-        const pngBytes = embedCardIntoPng(basePng, {
-            chara: utf8ToBase64(JSON.stringify(cardV2)),
-            ccv3: utf8ToBase64(JSON.stringify(cardV3)),
-        });
-
-        const built = { name, cardV2, cardV3, _pngBytes: pngBytes };
-
-        if (settings.importToTavern) {
-            await importProfileToTavern(built);
-            log(`已生成并导入剧情卡「${name}」，选它开新聊天即可`);
-            toast('success', `已导入剧情卡「${name}」`);
-        } else {
-            downloadBytes(pngBytes, `${safeFileName(name)}.png`);
-            log(`已导出剧情卡「${name}」`);
+    // 头图
+    let basePng;
+    if (state.darkImage && isPngBytes(state.darkImage) && !settings.resizeAvatar) {
+        basePng = state.darkImage;
+    } else if (state.darkImage) {
+        try {
+            basePng = await imageToPngBytes(new Blob([state.darkImage]),
+                { maxSize: Number(settings.avatarMaxSize) || 512 });
+        } catch {
+            basePng = null;
         }
+    }
+    if (!basePng) {
+        basePng = await generatePlaceholderPng(name, {
+            size: Math.max(256, Math.min(768, Number(settings.avatarMaxSize) || 512)),
+        });
+    }
+
+    const pngBytes = embedCardIntoPng(basePng, {
+        chara: utf8ToBase64(JSON.stringify(cardV2)),
+        ccv3: utf8ToBase64(JSON.stringify(cardV3)),
+    });
+
+    return { cardV2, cardV3, pngBytes, name };
+}
+
+/** 从导入的卡里读回剧本（我们自己嵌的那份） */
+function readScriptFromCard(card) {
+    return readScriptPayload(card);
+}
+
+/** 剧情页顶部的"当前素材"提示 */
+function updateStorySourceInfo() {
+    const info = $id('n2c-story-source');
+    if (!info) return;
+    const length = state.rawText?.length || 0;
+    if (!length) {
+        info.textContent = '未载入小说，也可以到「转换」页粘贴正文';
+        return;
+    }
+    const volumeLabel = activeVolumeLabel();
+    info.textContent = `当前素材：${state.novelTitle || '未命名'} · ${length.toLocaleString()} 字`
+        + `${volumeLabel ? ` · ${volumeLabel}` : ''}`;
+}
+
+/**
+ * 主流程：分析小说 → 产出**一张**可玩角色卡（下载到本地，不往角色栏塞）。
+ */
+async function runPlayableCard() {
+    if (state.running) return;
+    if (!requireEnabled()) return;
+
+    const text = activeText().trim();
+    if (!text) {
+        toast('warn', '请先载入小说文本');
+        return;
+    }
+
+    const abort = new AbortController();
+    state.abort = abort;
+    setRunning(true);
+    setProgress(3, '准备文本…');
+
+    try {
+        await ensureChunks(text);
+        const callModel = buildModelClient();
+        const volumeLabel = activeVolumeLabel();
+
+        // 1) 拆剧情
+        setProgress(15, '拆解剧情…');
+        log(`开始分析小说${volumeLabel ? `（${volumeLabel}）` : ''}…`);
+        const raw = await extractStoryStages({
+            chunks: state.chunks,
+            novelTitle: state.novelTitle,
+            playerName: getSettings().storyPlayerName,
+            callModel,
+            instruction: getSettings().extraInstruction,
+            signal: abort.signal,
+            targetNodes: Number(getSettings().storyNodeCount) || 12,
+        });
+
+        const playbook = normalizePlaybook(raw);
+        for (const warning of playbook.warnings) log(warning, 'warn');
+        if (!playbook.stages.length) throw new Error('模型没有返回可用的剧情节点');
+        state.playbook = playbook;
+        state.runtime = createRuntimeState(playbook);
+        state.storyActive = false;
+
+        // 2) 写开场白
+        setProgress(70, '写开场白…');
+        try {
+            state.storyOpening = await generateOpening({
+                novelTitle: state.novelTitle,
+                player: playbook.player,
+                stage: playbook.stages[0],
+                style: getSettings().storyStyle,
+                callModel,
+                signal: abort.signal,
+            });
+        } catch (error) {
+            log(`开场白生成失败，改用第一段情境代替：${error.message}`, 'warn');
+            state.storyOpening = playbook.stages[0].situation;
+        }
+
+        // 3) 打成一张卡并下载
+        setProgress(88, '打包角色卡…');
+        const built = await buildPlayableCard({});
+        downloadBytes(built.pngBytes, `${safeFileName(built.name)}.png`);
+
+        persistStoryToSettings();
+        saveRuntimeToChat();
+        renderStoryProgress();
+        renderStoryOpening();
+        updateStorySourceInfo();
+
+        const sizeKb = Math.round(built.pngBytes.length / 1024);
+        log(`已生成可玩角色卡「${built.name}」：${playbook.stages.length} 段剧情、`
+            + `${playbook.variables.length} 个变量、世界书 ${playbook.stages.length + 1} 条，共 ${sizeKb} KB`);
+        log('已下载到本地，没有动你的角色列表。要进角色栏请用「读取角色卡 PNG」后手动导入。');
+        setProgress(100, '完成');
+        toast('success', `角色卡「${built.name}」已下载（${sizeKb} KB）`);
+        await autoSaveCheckpoint('可玩角色卡生成完成');
     } catch (error) {
-        log(`生成剧情卡失败：${error.message}`, 'error');
-        toast('error', `生成剧情卡失败：${error.message}`);
+        log(`生成失败：${error.message}`, 'error');
+        toast('error', `生成失败：${error.message}`);
+        setProgress(0, '生成失败');
+    } finally {
+        setRunning(false);
+        state.abort = null;
+    }
+}
+
+/** 拿当前剧本重新下载一次卡（比如改完底图或设置后） */
+async function redownloadPlayableCard() {
+    if (!state.playbook?.stages?.length) {
+        toast('warn', '还没有剧情脚本');
+        return;
+    }
+    try {
+        const built = await buildPlayableCard({});
+        downloadBytes(built.pngBytes, `${safeFileName(built.name)}.png`);
+        toast('success', `已重新下载「${built.name}」`);
+    } catch (error) {
+        toast('error', `导出失败：${error.message}`);
+    }
+}
+
+/** 把当前剧本做成卡并**导入**角色列表（明确的手动动作，不会自动发生） */
+async function importCurrentPlayableCard() {
+    if (!state.playbook?.stages?.length) {
+        toast('warn', '请先生成角色卡');
+        return;
+    }
+    if (!requireEnabled()) return;
+    try {
+        const built = await buildPlayableCard({});
+        await importProfileToTavern({
+            name: built.name,
+            cardV2: built.cardV2,
+            cardV3: built.cardV3,
+            _pngBytes: built.pngBytes,
+        });
+        log(`已导入角色列表：${built.name}`);
+        toast('success', `已导入「${built.name}」，选它开新聊天即可`);
+    } catch (error) {
+        log(`导入失败：${error.message}`, 'error');
+        toast('error', `导入失败：${error.message}`);
     }
 }
 

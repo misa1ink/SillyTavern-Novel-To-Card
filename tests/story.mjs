@@ -286,5 +286,51 @@ test('currentStage 在越界时返回边界节点而不是 undefined', () => {
     assert.equal(story.currentStage({ stages: [] }, { stageIndex: 0 }), null);
 });
 
+console.log('\n[剧情] 卡内嵌剧本的存取');
+
+test('剧本打包成 payload 再读回来，内容不丢', () => {
+    const payload = story.buildScriptPayload(playbook, { novelTitle: '试炼之书', opening: '火光里你醒来。' });
+    const card = { spec: 'chara_card_v3', spec_version: '3.0', data: { name: '沈青梧', extensions: { [story.CARD_SCRIPT_KEY]: payload } } };
+
+    const read = story.readScriptPayload(card);
+    assert.ok(read, '读不回 payload');
+    assert.equal(read.novelTitle, '试炼之书');
+    assert.equal(read.opening, '火光里你醒来。');
+    assert.equal(read.playbook.stages.length, playbook.stages.length);
+    assert.equal(read.playbook.stages[0].title, '宗门残夜');
+    assert.deepEqual(read.playbook.variables, playbook.variables, '变量定义丢失');
+    assert.equal(read.playbook.player.name, '沈青梧', '玩家身份丢失');
+});
+
+test('兼容 extensions 放在顶层的卡', () => {
+    const payload = story.buildScriptPayload(playbook, { novelTitle: 'x' });
+    const read = story.readScriptPayload({ name: '甲', extensions: { [story.CARD_SCRIPT_KEY]: payload } });
+    assert.ok(read, '顶层 extensions 没被识别');
+    assert.equal(read.playbook.stages.length, playbook.stages.length);
+});
+
+test('普通角色卡（没有内嵌剧本）返回 null 而不是抛错', () => {
+    assert.equal(story.readScriptPayload({ spec: 'chara_card_v2', data: { name: '甲', extensions: {} } }), null);
+    assert.equal(story.readScriptPayload({ data: { name: '甲' } }), null);
+    assert.equal(story.readScriptPayload(null), null);
+    assert.equal(story.readScriptPayload('x'), null);
+});
+
+test('内嵌数据残缺时也返回 null（不会拿半份剧本去跑）', () => {
+    const bad = { data: { extensions: { [story.CARD_SCRIPT_KEY]: { version: 1, playbook: { stages: [] } } } } };
+    assert.equal(story.readScriptPayload(bad), null, '空 stages 应被拒绝');
+    const noPlaybook = { data: { extensions: { [story.CARD_SCRIPT_KEY]: { version: 1 } } } };
+    assert.equal(story.readScriptPayload(noPlaybook), null);
+});
+
+test('payload 经过 JSON 往返（模拟写入 PNG）后仍可读回', () => {
+    const payload = story.buildScriptPayload(playbook, { novelTitle: '试炼', opening: '开场' });
+    const card = { data: { extensions: { [story.CARD_SCRIPT_KEY]: payload } } };
+    const roundTrip = JSON.parse(JSON.stringify(card));
+    const read = story.readScriptPayload(roundTrip);
+    assert.ok(read);
+    assert.equal(read.playbook.stages[1].situation, playbook.stages[1].situation);
+});
+
 console.log(`\n结果：${passed} 通过，${failed} 失败\n`);
 process.exit(failed === 0 ? 0 : 1);

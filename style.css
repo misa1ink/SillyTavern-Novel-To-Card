@@ -257,6 +257,23 @@
     align-items: center;
 }
 
+/* 主行动按钮：一个页面只该有一个，做明显一些 */
+#n2c-panel .menu_button.n2c-big {
+    font-size: 13px;
+    font-weight: 600;
+    padding: 7px 16px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-color: var(--n2c-accent);
+    color: var(--n2c-accent);
+    background: rgba(184, 51, 106, 0.08);
+}
+
+#n2c-panel .menu_button.n2c-big:hover {
+    background: rgba(184, 51, 106, 0.16);
+}
+
 #n2c-panel .menu_button.n2c-primary {
     border-color: var(--n2c-accent);
     color: var(--n2c-accent);

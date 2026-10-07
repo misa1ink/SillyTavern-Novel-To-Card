@@ -356,6 +356,36 @@ export function buildStoryWorldInfo({ playbook, novelTitle, buildWorldInfoData }
     });
 }
 
+/** 卡里嵌剧本用的字段名（改这里要同步 index.js 的 CARD_SCRIPT_KEY） */
+export const CARD_SCRIPT_KEY = 'novel_to_card';
+
+/**
+ * 把剧本打包成要嵌进卡的 payload。
+ * 单独抽出来是为了能脱离酒馆运行时测试"存进去能读回来"这件事。
+ */
+export function buildScriptPayload(playbook, { novelTitle, opening } = {}) {
+    return {
+        version: 1,
+        novelTitle: String(novelTitle ?? ''),
+        playbook,
+        opening: String(opening ?? ''),
+        builtAt: Date.now(),
+    };
+}
+
+/**
+ * 从角色卡对象里读回剧本 payload；不是我们自己生成的卡就返回 null。
+ * 兼容 data.extensions 与顶层 extensions 两种位置（V2/V3 卡都见过）。
+ */
+export function readScriptPayload(card) {
+    if (!card || typeof card !== 'object') return null;
+    const data = card.data && typeof card.data === 'object' ? card.data : card;
+    const payload = data?.extensions?.[CARD_SCRIPT_KEY] ?? card?.extensions?.[CARD_SCRIPT_KEY];
+    if (!payload || typeof payload !== 'object') return null;
+    if (!Array.isArray(payload.playbook?.stages) || !payload.playbook.stages.length) return null;
+    return payload;
+}
+
 /** 给界面用的进度摘要 */
 export function summarizeProgress(playbook, runtime) {
     const total = totalStages(playbook);
