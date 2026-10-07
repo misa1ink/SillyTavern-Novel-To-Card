@@ -1,0 +1,12 @@
+{
+  "display_name": "小说转角色卡",
+  "loading_order": 120,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "DSH",
+  "version": "1.0.0",
+  "homePage": "",
+  "auto_update": false
+}

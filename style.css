@@ -1,0 +1,264 @@
+/* 小说转角色卡 —— 面板样式
+   尽量只用酒馆主题变量，跟随用户的主题切换 */
+
+#n2c-panel .n2c-section {
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 0.5px solid var(--color-border-tertiary, rgba(128, 128, 128, 0.25));
+}
+
+#n2c-panel .n2c-section:last-child {
+    border-bottom: none;
+}
+
+#n2c-panel .n2c-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text-secondary, #666);
+    margin-bottom: 6px;
+}
+
+#n2c-panel .n2c-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+#n2c-panel .n2c-grow {
+    flex: 1;
+    min-width: 120px;
+}
+
+#n2c-panel .n2c-file-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+#n2c-panel .n2c-hint {
+    font-size: 11px;
+    opacity: 0.7;
+    margin-top: 4px;
+    line-height: 1.5;
+}
+
+#n2c-panel .n2c-hint-inline {
+    font-size: 11px;
+    opacity: 0.6;
+    font-weight: 400;
+}
+
+#n2c-panel .n2c-textarea {
+    width: 100%;
+    margin-top: 6px;
+    resize: vertical;
+    font-size: 12px;
+    line-height: 1.6;
+    font-family: inherit;
+}
+
+#n2c-panel .menu_button.n2c-primary {
+    border-color: var(--n2c-accent, #b8336a);
+    color: var(--n2c-accent, #b8336a);
+}
+
+#n2c-panel .menu_button.n2c-danger {
+    border-color: #c0392b;
+    color: #c0392b;
+}
+
+#n2c-panel .menu_button.n2c-small {
+    font-size: 11px;
+    padding: 2px 8px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+#n2c-panel .n2c-progress {
+    height: 6px;
+    border-radius: 3px;
+    background: var(--color-border-tertiary, rgba(128, 128, 128, 0.2));
+    overflow: hidden;
+    margin-top: 8px;
+}
+
+#n2c-panel .n2c-progress-bar {
+    height: 100%;
+    width: 0;
+    background: var(--n2c-accent, #b8336a);
+    transition: width 0.25s ease;
+}
+
+/* ---------------- 角色列表 ---------------- */
+
+#n2c-panel .n2c-chars {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+#n2c-panel .n2c-char-row {
+    display: grid;
+    grid-template-columns: auto minmax(80px, 1fr) minmax(100px, 1.4fr) auto;
+    gap: 6px;
+    align-items: center;
+}
+
+#n2c-panel .n2c-char-check {
+    margin: 0;
+}
+
+#n2c-panel .n2c-char-name,
+#n2c-panel .n2c-char-role {
+    font-size: 12px;
+    height: 28px;
+    padding: 2px 6px;
+}
+
+#n2c-panel .n2c-char-meta {
+    font-size: 10px;
+    opacity: 0.6;
+    white-space: nowrap;
+}
+
+#n2c-panel .n2c-badge {
+    display: inline-block;
+    padding: 0 4px;
+    border-radius: 3px;
+    font-size: 10px;
+    background: rgba(128, 128, 128, 0.18);
+}
+
+#n2c-panel .n2c-badge-high {
+    background: rgba(39, 174, 96, 0.2);
+}
+
+#n2c-panel .n2c-badge-low {
+    background: rgba(192, 57, 43, 0.2);
+}
+
+/* ---------------- 结果 ---------------- */
+
+#n2c-panel .n2c-results {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+#n2c-panel .n2c-result {
+    display: flex;
+    gap: 10px;
+    padding: 8px;
+    border-radius: 6px;
+    background: var(--color-background-secondary, rgba(128, 128, 128, 0.08));
+}
+
+#n2c-panel .n2c-result-avatar {
+    width: 56px;
+    height: 56px;
+    border-radius: 6px;
+    object-fit: cover;
+    flex-shrink: 0;
+}
+
+#n2c-panel .n2c-result-body {
+    flex: 1;
+    min-width: 0;
+}
+
+#n2c-panel .n2c-result-name {
+    font-weight: 600;
+    font-size: 13px;
+    margin-bottom: 2px;
+}
+
+#n2c-panel .n2c-result-stats {
+    font-size: 11px;
+    opacity: 0.72;
+    line-height: 1.55;
+    margin-bottom: 6px;
+    word-break: break-word;
+}
+
+#n2c-panel .n2c-result-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+/* ---------------- 高级设置 ---------------- */
+
+#n2c-panel .n2c-subdrawer {
+    border: none;
+}
+
+#n2c-panel .n2c-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 8px;
+    margin-bottom: 10px;
+}
+
+#n2c-panel .n2c-field {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font-size: 11px;
+    opacity: 0.95;
+}
+
+#n2c-panel .n2c-field-wide {
+    margin-bottom: 8px;
+}
+
+#n2c-panel .n2c-checks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+    margin-bottom: 10px;
+}
+
+#n2c-panel .n2c-checks .checkbox_label {
+    font-size: 11px;
+    margin: 0;
+}
+
+/* ---------------- 日志 ---------------- */
+
+#n2c-panel .n2c-log-head {
+    justify-content: space-between;
+}
+
+#n2c-panel .n2c-log {
+    max-height: 190px;
+    overflow-y: auto;
+    font-size: 11px;
+    line-height: 1.6;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: var(--color-background-secondary, rgba(128, 128, 128, 0.08));
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+#n2c-panel .n2c-log-line {
+    display: flex;
+    gap: 6px;
+    word-break: break-word;
+}
+
+#n2c-panel .n2c-log-time {
+    opacity: 0.45;
+    flex-shrink: 0;
+}
+
+#n2c-panel .n2c-log-warn .n2c-log-text {
+    color: #d68910;
+}
+
+#n2c-panel .n2c-log-error .n2c-log-text {
+    color: #c0392b;
+}

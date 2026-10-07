@@ -1,0 +1,12 @@
+# 依赖与构建产物（本扩展零依赖，无构建步骤）
+node_modules/
+
+# 编辑器与系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 本地跑测试时可能留下的临时文件
+tests/_syntax.mjs
+*.log
