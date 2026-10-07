@@ -927,5 +927,138 @@ test('档案提示词会把已知别名写进去', () => {
     assert.ok(user.includes('沈师姐'));
 });
 
+console.log('\n[8] 获取模型列表');
+
+test('extractModelIds 能吃下各种返回形状', () => {
+    assert.deepEqual(ai.extractModelIds({ data: [{ id: 'b' }, { id: 'a' }] }), ['a', 'b']);
+    assert.deepEqual(ai.extractModelIds({ models: [{ name: 'x' }, { id: 'y' }] }), ['x', 'y']);
+    assert.deepEqual(ai.extractModelIds(['m2', 'm1']), ['m1', 'm2']);
+    assert.deepEqual(ai.extractModelIds({ data: ['z', { model: 'w' }] }), ['w', 'z']);
+    assert.deepEqual(ai.extractModelIds({ data: [{ id: 'dup' }, { id: 'dup' }] }), ['dup'], '应去重');
+    assert.deepEqual(ai.extractModelIds({ data: [{ id: '' }, { nope: 1 }, null] }), [], '应剔除空值');
+    assert.deepEqual(ai.extractModelIds(null), []);
+    assert.deepEqual(ai.extractModelIds({}), []);
+});
+
+test('模型名按匹配度排序，便于在长列表里找', () => {
+    const models = ['gpt-4o-mini', 'deepseek-chat', 'other-deepseek-x', 'gpt-4o'];
+    assert.deepEqual(ai.sortModelsByRelevance(models, 'gpt-4o'), ['gpt-4o', 'gpt-4o-mini', 'deepseek-chat', 'other-deepseek-x']);
+    assert.deepEqual(ai.sortModelsByRelevance(models, 'deepseek'), ['deepseek-chat', 'other-deepseek-x', 'gpt-4o', 'gpt-4o-mini']);
+    assert.deepEqual(ai.sortModelsByRelevance(models, ''), models, '空关键词保持原序');
+    assert.deepEqual(ai.sortModelsByRelevance(models, '   '), models);
+});
+
+test('走酒馆代理成功时返回模型并用 tavern 标记来源', async () => {
+    const originalFetch = globalThis.fetch;
+    const calls = [];
+    globalThis.fetch = async (url, init) => {
+        calls.push({ url, body: init?.body ? JSON.parse(init.body) : null });
+        return { ok: true, status: 200, json: async () => ({ data: [{ id: 'm-a' }, { id: 'm-b' }] }) };
+    };
+    try {
+        const result = await ai.fetchModelList({
+            apiConfig: { url: 'https://api.test.com', key: 'sk-k' },
+            getRequestHeaders: () => ({ 'X-CSRF-Token': 't' }),
+        });
+        assert.equal(result.via, 'tavern');
+        assert.deepEqual(result.models, ['m-a', 'm-b']);
+        assert.equal(calls.length, 1, '代理成功就不该再直连');
+        assert.equal(calls[0].url, '/api/backends/chat-completions/status');
+        assert.equal(calls[0].body.chat_completion_source, 'openai');
+        assert.equal(calls[0].body.reverse_proxy, 'https://api.test.com/v1');
+        assert.equal(calls[0].body.proxy_password, 'sk-k');
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test('代理失败时回落直连 /models，并用 direct 标记来源', async () => {
+    const originalFetch = globalThis.fetch;
+    const urls = [];
+    globalThis.fetch = async url => {
+        urls.push(String(url));
+        if (String(url).includes('/api/backends/')) {
+            return { ok: false, status: 500, text: async () => 'boom' };
+        }
+        return { ok: true, status: 200, json: async () => ({ data: [{ id: 'direct-model' }] }) };
+    };
+    try {
+        const result = await ai.fetchModelList({ apiConfig: { url: 'https://api.test.com/v1', key: 'k' } });
+        assert.equal(result.via, 'direct');
+        assert.deepEqual(result.models, ['direct-model']);
+        assert.equal(urls.length, 2);
+        assert.equal(urls[1], 'https://api.test.com/v1/models');
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test('代理返回空列表时也会回落直连', async () => {
+    const originalFetch = globalThis.fetch;
+    let directCalled = false;
+    globalThis.fetch = async url => {
+        if (String(url).includes('/api/backends/')) {
+            return { ok: true, status: 200, json: async () => ({ data: [] }) };
+        }
+        directCalled = true;
+        return { ok: true, status: 200, json: async () => ({ data: [{ id: 'm' }] }) };
+    };
+    try {
+        const result = await ai.fetchModelList({ apiConfig: { url: 'https://x.com/v1' } });
+        assert.equal(result.via, 'direct');
+        assert.equal(directCalled, true);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test('两条路都失败时抛出带原因的报错', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async url => {
+        if (String(url).includes('/api/backends/')) {
+            return { ok: false, status: 401, text: async () => 'invalid key' };
+        }
+        return { ok: false, status: 403 };
+    };
+    try {
+        await assert.rejects(
+            () => ai.fetchModelList({ apiConfig: { url: 'https://x.com/v1', key: 'bad' } }),
+            error => {
+                assert.match(error.message, /拿不到模型列表/);
+                assert.match(error.message, /401/);
+                assert.match(error.message, /403/);
+                return true;
+            },
+        );
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test('网络异常也被包成可读错误', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => { throw new TypeError('Failed to fetch'); };
+    try {
+        await assert.rejects(
+            () => ai.fetchModelList({ apiConfig: { url: 'https://x.com/v1' } }),
+            /拿不到模型列表.*Failed to fetch/s,
+        );
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test('未填地址时立刻报错，不发请求', async () => {
+    const originalFetch = globalThis.fetch;
+    let called = false;
+    globalThis.fetch = async () => { called = true; return { ok: true, json: async () => ({}) }; };
+    try {
+        await assert.rejects(() => ai.fetchModelList({ apiConfig: { url: '   ' } }), /请先填写接口地址/);
+        assert.equal(called, false, '不该发出请求');
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
 console.log(`\n结果：${passed} 通过，${failed} 失败\n`);
 process.exit(failed === 0 ? 0 : 1);

@@ -245,6 +245,96 @@ export async function testCustomApi({ apiConfig, getRequestHeaders }) {
     return { ok: true, elapsedMs: Date.now() - started, sample: text.slice(0, 60) };
 }
 
+/** 从各种可能的返回形状里抠出模型 id 列表 */
+export function extractModelIds(payload) {
+    const rows = Array.isArray(payload?.data) ? payload.data
+        : Array.isArray(payload?.models) ? payload.models
+            : Array.isArray(payload) ? payload
+                : [];
+    const ids = [];
+    for (const row of rows) {
+        const id = typeof row === 'string' ? row : (row?.id ?? row?.name ?? row?.model);
+        const text = String(id ?? '').trim();
+        if (text) ids.push(text);
+    }
+    return [...new Set(ids)].sort((left, right) => left.localeCompare(right));
+}
+
+/**
+ * 拉取可用模型列表。
+ *
+ * 两条路径：先走酒馆后端代理（与生成请求同源，不受 CORS 影响），
+ * 失败再直连 {base}/models 兜底（部分中转站只认直连）。
+ *
+ * @param {{apiConfig: {url: string, key?: string}, getRequestHeaders?: Function}} options
+ * @returns {Promise<{models: string[], via: 'tavern'|'direct'}>}
+ */
+export async function fetchModelList({ apiConfig, getRequestHeaders }) {
+    const base = normalizeApiBase(apiConfig.url);
+    if (!base) throw new Error('请先填写接口地址');
+    const key = apiConfig.key || '';
+
+    const attempts = [];
+
+    // 路径一：酒馆后端代理
+    try {
+        const response = await fetch('/api/backends/chat-completions/status', {
+            method: 'POST',
+            headers: { ...(getRequestHeaders?.() || {}), 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                chat_completion_source: 'openai',
+                reverse_proxy: base,
+                proxy_password: key,
+            }),
+        });
+        if (response.ok) {
+            const models = extractModelIds(await response.json());
+            if (models.length) return { models, via: 'tavern' };
+            attempts.push('酒馆代理返回空列表');
+        } else {
+            const detail = await response.text().catch(() => '');
+            attempts.push(`酒馆代理 HTTP ${response.status} ${detail.slice(0, 120)}`.trim());
+        }
+    } catch (error) {
+        attempts.push(`酒馆代理失败：${error?.message || error}`);
+    }
+
+    // 路径二：直连 /models
+    try {
+        const response = await fetch(`${base}/models`, {
+            headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' },
+        });
+        if (response.ok) {
+            const models = extractModelIds(await response.json());
+            if (models.length) return { models, via: 'direct' };
+            attempts.push('直连返回空列表');
+        } else {
+            attempts.push(`直连 HTTP ${response.status}`);
+        }
+    } catch (error) {
+        attempts.push(`直连失败：${error?.message || error}`);
+    }
+
+    throw new Error(`拿不到模型列表。${attempts.join('；')}`);
+}
+
+/**
+ * 把模型名按与关键词的匹配度排序，方便在国家/厂商混杂的长列表里找。
+ * 不改变大小写，只重排。
+ */
+export function sortModelsByRelevance(models, keyword) {
+    const needle = String(keyword ?? '').trim().toLowerCase();
+    if (!needle) return [...models];
+    const score = name => {
+        const lower = name.toLowerCase();
+        if (lower === needle) return 0;
+        if (lower.startsWith(needle)) return 1;
+        if (lower.includes(needle)) return 2;
+        return 3;
+    };
+    return [...models].sort((left, right) => score(left) - score(right) || left.localeCompare(right));
+}
+
 function sleep(ms, signal) {
     return new Promise((resolve, reject) => {
         const timer = setTimeout(resolve, ms);

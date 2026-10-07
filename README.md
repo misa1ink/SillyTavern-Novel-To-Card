@@ -106,6 +106,9 @@ git clone https://github.com/misa1ink/SillyTavern-Novel-To-Card.git
 | 酒馆本身用的模型不适合做结构化输出 | 切到独立 API 换一个擅长 JSON 的模型 |
 
 - 地址填到**版本段**即可（如 `https://api.deepseek.com/v1`），服务端会自己拼 `/chat/completions`
+- **模型名不用手打**：点模型名右侧的列表按钮即可从接口拉取可用模型，自动填进下拉框。
+  首次拉取时还会自动挑一个常见的对话模型（`chat` / `instruct` / `deepseek` / `gpt` / `claude` / `gemini` 之类）作为默认值。
+  找不到列表时（部分中转站不提供）会自动放开「手动输入模型名」，不会把你卡住
 - 支持 `temperature` / `top_p` 覆盖，留空则跟随默认
 - 点 **「测试连接」** 会发一个最小请求，直接告诉你通不通、耗时多少、返回了什么——不用等到跑长篇才发现填错
 - 请求走酒馆后端转发（`/api/backends/chat-completions/generate`），与普通生成同源同形；**Key 只存在本地设置里**
@@ -209,13 +212,14 @@ tests/fake-indexeddb.mjs  内存版 IndexedDB，供存档测试使用
 无需安装任何依赖，也不需要酒馆在运行：
 
 ```bash
-node tests/run.mjs                                  # 83 项单元测试
+node tests/run.mjs                                  # 91 项单元测试
 node --experimental-vm-modules tests/harness.mjs    # 27 项加载与交互测试
 ```
 
 `tests/run.mjs` 覆盖：PNG 区块写入与读回、CRC 自洽、IDAT 像素不变、base64 中文往返、
 卡片字段组装、世界书结构、模型输出 JSON 容错（截断 / 围栏 / 中文引号）、分段与人物合并、
-分卷（章标题识别 / 不丢字 / 卷数精确 / 下限保护）、独立 API 请求契约与错误处理、档位归一。
+分卷（章标题识别 / 不丢字 / 卷数精确 / 下限保护）、独立 API 请求契约与错误处理、档位归一、
+**模型列表拉取（两种返回形状 / 代理与直连回落 / 失败原因聚合）**。
 
 `tests/harness.mjs` 会在 Node 里用**最小 DOM（含事件冒泡、dataset、节点树遍历）**
 **+ 桩模块 + 内存版 IndexedDB 真正求值 `index.js`**，断言：面板能挂载、四个标签页齐全、

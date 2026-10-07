@@ -20,6 +20,7 @@ import {
     splitNovel,
     createConfiguredModelClient,
     testCustomApi,
+    fetchModelList,
     discoverCharacters,
     mergeCharacters,
     collectEvidence,
@@ -108,6 +109,7 @@ const DEFAULT_SETTINGS = Object.freeze({
     apiStream: false,
     apiTemperature: '',
     apiTopP: '',
+    apiManualModel: false,
     // 角色分级
     tierEnabled: true,
     maxProtagonists: 3,
@@ -150,6 +152,8 @@ const state = {
     snapshotList: [],
     // 界面
     activeTab: 'work',
+    // 独立 API 拉取到的模型列表（只存内存，避免把长列表塞进设置）
+    modelList: [],
 };
 
 // ================================================================
@@ -382,7 +386,13 @@ function renderTabSettings(s) {
         <label class="n2c-field n2c-field-wide2"><span>接口地址</span>
           <input type="text" id="n2c-api-url" class="text_pole" placeholder="https://api.deepseek.com/v1" value="${escapeHtml(s.apiUrl)}"></label>
         <label class="n2c-field"><span>模型名</span>
-          <input type="text" id="n2c-api-model" class="text_pole" placeholder="deepseek-chat" value="${escapeHtml(s.apiModel)}"></label>
+          <div class="n2c-row n2c-row-tight">
+            <select id="n2c-api-model-select" class="text_pole n2c-grow">${renderModelOptions()}</select>
+            <div class="menu_button n2c-small n2c-icon-btn" id="n2c-api-models" title="从接口拉取可用模型列表">
+              <i class="fa-solid fa-list"></i>
+            </div>
+          </div>
+        </label>
         <label class="n2c-field n2c-field-wide2"><span>API Key</span>
           <input type="password" id="n2c-api-key" class="text_pole" placeholder="sk-..." value="${escapeHtml(s.apiKey)}"></label>
         <label class="n2c-field"><span>temperature</span>
@@ -392,10 +402,15 @@ function renderTabSettings(s) {
       </div>
       <div class="n2c-row">
         <label class="checkbox_label"><input type="checkbox" id="n2c-api-stream" ${s.apiStream ? 'checked' : ''}><span>流式请求</span></label>
+        <label class="checkbox_label"><input type="checkbox" id="n2c-api-manual-model" ${s.apiManualModel ? 'checked' : ''}><span>手动输入模型名</span></label>
         <div class="menu_button n2c-small" id="n2c-api-test"><i class="fa-solid fa-plug-circle-check"></i> 测试连接</div>
       </div>
+      <label class="n2c-field n2c-field-wide" id="n2c-api-manual-wrap" style="${s.apiManualModel ? '' : 'display:none'}">
+        <span>手动模型名（接口不支持列模型时用）</span>
+        <input type="text" id="n2c-api-model" class="text_pole" placeholder="deepseek-chat" value="${escapeHtml(s.apiModel)}">
+      </label>
       <div class="n2c-hint" id="n2c-api-test-result"></div>
-      <div class="n2c-hint">地址填到版本段即可（如 <code>https://api.deepseek.com/v1</code>），服务端会自己拼 <code>/chat/completions</code>。请求经酒馆后端转发，与普通生成同源；Key 只存在本地设置里。</div>
+      <div class="n2c-hint">点右侧列表按钮可从接口拉取可用模型，免去手打。地址填到版本段即可（如 <code>https://api.deepseek.com/v1</code>），服务端会自己拼 <code>/chat/completions</code>。请求经酒馆后端转发，与普通生成同源；Key 只存在本地设置里。</div>
     </div>
   </div>
 
@@ -824,6 +839,8 @@ function bindPanelHeaderEvents() {
         if (!tab || !panel.contains(tab)) return;
         switchTab(tab.dataset.tab);
     });
+
+    initApiControls();
 }
 
 // ================================================================
@@ -1031,13 +1048,37 @@ function bindPanelEvents() {
     };
     bindApiText('n2c-api-url', 'apiUrl');
     bindApiText('n2c-api-key', 'apiKey');
-    bindApiText('n2c-api-model', 'apiModel');
     bindApiText('n2c-api-temperature', 'apiTemperature');
     bindApiText('n2c-api-top-p', 'apiTopP');
+
+    // 手动模型名：写回设置并同步下拉框，避免两处显示不一致
+    $id('n2c-api-model')?.addEventListener('input', event => {
+        s.apiModel = event.target.value;
+        if (state._apiTimer) clearTimeout(state._apiTimer);
+        state._apiTimer = setTimeout(putSettings, 500);
+        refreshModelSelect(event.target.value);
+    });
 
     $id('n2c-api-stream')?.addEventListener('change', event => {
         s.apiStream = event.target.checked;
         putSettings();
+    });
+
+    // 模型下拉框：选中的值写入 apiModel
+    $id('n2c-api-model-select')?.addEventListener('change', event => {
+        s.apiModel = event.target.value;
+        putSettings();
+        if (state._apiTimer) clearTimeout(state._apiTimer);
+    });
+
+    // 拉取模型列表
+    $id('n2c-api-models')?.addEventListener('click', () => fetchModels());
+
+    // 手动输入模型名
+    $id('n2c-api-manual-model')?.addEventListener('change', event => {
+        s.apiManualModel = event.target.checked;
+        putSettings();
+        syncApiManualVisibility();
     });
 
     $id('n2c-api-test')?.addEventListener('click', () => testApiConnection());
@@ -1648,6 +1689,112 @@ async function maybeOfferRestore() {
 // 环境检查
 // ================================================================
 
+/** 模型下拉框的选项：优先用拉取到的列表，并把当前已选模型并进去避免显示丢空 */
+function renderModelOptions() {
+    const s = getSettings();
+    const saved = String(s.apiModel || '').trim();
+    const models = state.modelList?.length ? [...state.modelList] : [];
+
+    if (saved && !models.includes(saved)) models.unshift(saved);
+    if (!models.length) {
+        return `<option value="${escapeHtml(saved)}">${saved ? escapeHtml(saved) : '（点右侧列表按钮获取）'}</option>`;
+    }
+
+    return models.map(name => {
+        const selected = name === saved ? ' selected' : '';
+        return `<option value="${escapeHtml(name)}"${selected}>${escapeHtml(name)}</option>`;
+    }).join('');
+}
+
+/** 刷新模型下拉框；不动用户当前选择 */
+function refreshModelSelect(preserveValue) {
+    const select = $id('n2c-api-model-select');
+    if (!select) return;
+    const s = getSettings();
+    const keep = preserveValue ?? s.apiModel ?? '';
+    select.innerHTML = renderModelOptions();
+    if (keep) {
+        select.value = keep;
+        // 列表里没有这个值时（例如刚手动输入），补一个选项避免选择被清空
+        if (select.value !== keep) {
+            const option = document.createElement('option');
+            option.value = keep;
+            option.textContent = keep;
+            select.appendChild(option);
+            select.value = keep;
+        }
+    }
+    syncApiManualVisibility();
+}
+
+function syncApiManualVisibility() {
+    const wrap = $id('n2c-api-manual-wrap');
+    if (wrap) wrap.style.display = getSettings().apiManualModel ? '' : 'none';
+}
+
+/** 当前实际生效的模型名：开了手动输入就用输入框，否则用下拉框 */
+function currentModelValue() {
+    const settings = getSettings();
+    const manual = $id('n2c-api-model')?.value?.trim();
+    if (settings.apiManualModel && manual) return manual;
+    const select = $id('n2c-api-model-select')?.value?.trim();
+    if (select) return select;
+    return settings.apiModel || manual || '';
+}
+
+/**
+ * 从接口拉取模型列表并填进下拉框。
+ * 走 ai.js 的 fetchModelList：先试酒馆后端代理，失败再直连 /models。
+ */
+async function fetchModels() {
+    const settings = getSettings();
+    if (!settings.apiUrl) {
+        toast('warn', '请先填写接口地址');
+        return;
+    }
+
+    const button = $id('n2c-api-models');
+    const result = $id('n2c-api-test-result');
+    if (button) button.classList.add('n2c-busy');
+    if (result) result.textContent = '正在获取模型列表…';
+
+    try {
+        const context = requireContext();
+        const { models, via } = await fetchModelList({
+            apiConfig: { url: settings.apiUrl, key: settings.apiKey },
+            getRequestHeaders: context.getRequestHeaders?.bind(context),
+        });
+
+        state.modelList = models;
+        // 没选过模型就自动落在一个常见的对话模型上，省一次点击
+        if (!settings.apiModel) {
+            const guess = models.find(name => /chat|instruct|turbo|deepseek|gpt|claude|gemini/i.test(name));
+            settings.apiModel = guess || models[0];
+            putSettings();
+        }
+        refreshModelSelect();
+
+        const channel = via === 'tavern' ? '酒馆代理' : '直连';
+        const text = `获取到 ${models.length} 个模型（${channel}），已填入下拉框`;
+        if (result) result.textContent = text;
+        log(`模型列表：${text}`);
+        toast('success', `获取到 ${models.length} 个模型`);
+    } catch (error) {
+        const text = `获取失败：${error.message}`;
+        if (result) result.textContent = text;
+        log(`获取模型列表失败：${error.message}`, 'error');
+        toast('error', '获取模型列表失败，可在下方勾选「手动输入模型名」');
+        // 失败时自动放开手动输入，别让用户卡在空下拉框上
+        settings.apiManualModel = true;
+        putSettings();
+        const checkbox = $id('n2c-api-manual-model');
+        if (checkbox) checkbox.checked = true;
+        syncApiManualVisibility();
+    } finally {
+        if (button) button.classList.remove('n2c-busy');
+    }
+}
+
 function requireContext() {
     const context = getContext();
     if (!context) throw new Error('拿不到酒馆上下文 getContext()');
@@ -1661,6 +1808,13 @@ function syncApiConfigVisibility() {
     box.style.display = getSettings().apiClient === 'custom' ? '' : 'none';
 }
 
+/** 打开面板时把模型下拉框按已保存的设置铺好 */
+function initApiControls() {
+    syncApiConfigVisibility();
+    syncApiManualVisibility();
+    refreshModelSelect();
+}
+
 function buildModelClient() {
     const context = requireContext();
     const settings = getSettings();
@@ -1672,7 +1826,7 @@ function buildModelClient() {
     const custom = {
         url: settings.apiUrl,
         key: settings.apiKey,
-        model: settings.apiModel,
+        model: currentModelValue(),
         stream: settings.apiStream === true,
         temperature: settings.apiTemperature === '' ? undefined : Number(settings.apiTemperature),
         top_p: settings.apiTopP === '' ? undefined : Number(settings.apiTopP),
@@ -1684,10 +1838,12 @@ function buildModelClient() {
 async function testApiConnection() {
     const result = $id('n2c-api-test-result');
     const settings = getSettings();
+    // 模型名以界面上实际生效的那个为准，避免手填与下拉不一致
+    const model = currentModelValue();
     const custom = {
         url: settings.apiUrl,
         key: settings.apiKey,
-        model: settings.apiModel,
+        model,
         stream: false,
         temperature: undefined,
         top_p: undefined,
