@@ -12,8 +12,9 @@
  * 不写入聊天记录，也不走角色卡/预设的提示词注入。
  */
 
-import { getContext, extension_settings, saveSettingsDebounced } from '../../../extensions.js';
-import { getCharacters } from '../../../../script.js';
+import { getContext, extension_settings } from '../../../extensions.js';
+// saveSettingsDebounced 由 script.js 导出，extensions.js 不导出它（导入错会在激活期直接抛 SyntaxError）
+import { saveSettingsDebounced, getCharacters } from '../../../../script.js';
 
 import {
     splitNovel,
