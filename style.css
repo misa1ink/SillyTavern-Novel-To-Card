@@ -1,22 +1,166 @@
 /* 小说转角色卡 —— 面板样式
-   尽量只用酒馆主题变量，跟随用户的主题切换 */
+   结构：标签页（.n2c-tabs）切换面板（.n2c-pane），每页内容用卡片（.n2c-card）分组。
+   颜色一律走酒馆主题变量，跟随用户主题切换。 */
 
-#n2c-panel .n2c-section {
-    margin-bottom: 10px;
-    padding-bottom: 8px;
+#n2c-panel,
+.n2c-window {
+    --n2c-accent: #b8336a;
+    --n2c-gap: 10px;
+}
+
+/* ---------------- 头部 ---------------- */
+
+#n2c-panel .n2c-head {
+    align-items: center;
+    gap: 8px;
+}
+
+#n2c-panel .n2c-head-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+}
+
+#n2c-panel .n2c-master {
+    margin: 0;
+    font-size: 11px;
+    gap: 4px;
+    white-space: nowrap;
+}
+
+#n2c-panel .n2c-disabled-badge {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    background: rgba(192, 57, 43, 0.18);
+    border: 0.5px solid rgba(192, 57, 43, 0.4);
+    color: #c0392b;
+    white-space: nowrap;
+}
+
+#n2c-panel.n2c-off .n2c-body {
+    opacity: 0.42;
+    filter: grayscale(0.6);
+    pointer-events: none;
+    user-select: none;
+}
+
+#n2c-panel.n2c-off .n2c-body::after {
+    content: '插件已关闭 —— 勾选右上角「启用」后可继续使用';
+    display: block;
+    padding: 12px;
+    text-align: center;
+    font-size: 12px;
+}
+
+/* ---------------- 标签页 ---------------- */
+
+#n2c-panel .n2c-tabs {
+    display: flex;
+    gap: 2px;
+    margin-bottom: var(--n2c-gap);
     border-bottom: 0.5px solid var(--color-border-tertiary, rgba(128, 128, 128, 0.25));
 }
 
-#n2c-panel .n2c-section:last-child {
+#n2c-panel .n2c-tab {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 6px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    border-radius: 5px 5px 0 0;
+    opacity: 0.62;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: opacity 0.12s, background 0.12s;
+    white-space: nowrap;
+}
+
+#n2c-panel .n2c-tab:hover {
+    opacity: 0.88;
+    background: var(--color-background-secondary, rgba(128, 128, 128, 0.08));
+}
+
+#n2c-panel .n2c-tab-active {
+    opacity: 1;
+    font-weight: 600;
+    color: var(--n2c-accent);
+    border-bottom-color: var(--n2c-accent);
+}
+
+#n2c-panel .n2c-tab i {
+    font-size: 11px;
+}
+
+/* 只有当前页显示 */
+#n2c-panel .n2c-pane {
+    display: none;
+}
+
+#n2c-panel .n2c-pane-active {
+    display: block;
+}
+
+#n2c-panel .n2c-tabpanes {
+    min-height: 200px;
+}
+
+/* ---------------- 卡片 ---------------- */
+
+#n2c-panel .n2c-card {
+    border: 0.5px solid var(--color-border-tertiary, rgba(128, 128, 128, 0.25));
+    border-radius: 6px;
+    padding: 9px 11px 11px;
+    margin-bottom: var(--n2c-gap);
+    background: var(--color-background-secondary, rgba(128, 128, 128, 0.05));
+}
+
+#n2c-panel .n2c-card-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: var(--color-text-secondary, #999);
+}
+
+#n2c-panel .n2c-card-head i {
+    font-size: 11px;
+    opacity: 0.8;
+}
+
+#n2c-panel .n2c-card-head.n2c-card-head {
     border-bottom: none;
 }
 
-#n2c-panel .n2c-label {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--color-text-secondary, #666);
-    margin-bottom: 6px;
+#n2c-panel .n2c-card-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
 }
+
+#n2c-panel .n2c-head-check {
+    margin: 0 0 0 auto;
+    font-size: 11px;
+    font-weight: 400;
+    gap: 4px;
+}
+
+#n2c-panel .n2c-count {
+    font-size: 11px;
+    font-weight: 400;
+    opacity: 0.7;
+}
+
+#n2c-panel .n2c-card-actions .n2c-count {
+    margin-left: auto;
+}
+
+/* ---------------- 通用表单 ---------------- */
 
 #n2c-panel .n2c-row {
     display: flex;
@@ -25,9 +169,47 @@
     flex-wrap: wrap;
 }
 
+#n2c-panel .n2c-row + .n2c-row {
+    margin-top: 6px;
+}
+
+#n2c-panel .n2c-row-actions {
+    gap: 8px;
+}
+
 #n2c-panel .n2c-grow {
     flex: 1;
     min-width: 120px;
+}
+
+#n2c-panel .n2c-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 8px 10px;
+}
+
+#n2c-panel .n2c-field {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font-size: 11px;
+    color: var(--color-text-secondary, #999);
+}
+
+#n2c-panel .n2c-field-wide {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 11px;
+    margin-top: 8px;
+    color: var(--color-text-secondary, #999);
+}
+
+#n2c-panel .n2c-field .text_pole,
+#n2c-panel .n2c-field-wide .text_pole,
+#n2c-panel .n2c-field select {
+    font-size: 12px;
+    height: 30px;
 }
 
 #n2c-panel .n2c-file-btn {
@@ -40,9 +222,9 @@
 
 #n2c-panel .n2c-hint {
     font-size: 11px;
-    opacity: 0.7;
-    margin-top: 4px;
-    line-height: 1.5;
+    opacity: 0.66;
+    margin-top: 5px;
+    line-height: 1.55;
 }
 
 #n2c-panel .n2c-hint-inline {
@@ -60,9 +242,24 @@
     font-family: inherit;
 }
 
+#n2c-panel .menu_button.n2c-small {
+    font-size: 11px;
+    padding: 3px 9px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+}
+
+#n2c-panel .menu_button.n2c-icon-btn {
+    padding: 3px 8px;
+    display: inline-flex;
+    align-items: center;
+}
+
 #n2c-panel .menu_button.n2c-primary {
-    border-color: var(--n2c-accent, #b8336a);
-    color: var(--n2c-accent, #b8336a);
+    border-color: var(--n2c-accent);
+    color: var(--n2c-accent);
 }
 
 #n2c-panel .menu_button.n2c-danger {
@@ -70,26 +267,47 @@
     color: #c0392b;
 }
 
-#n2c-panel .menu_button.n2c-small {
+#n2c-panel .menu_button.n2c-busy {
+    opacity: 0.55;
+    pointer-events: none;
+}
+
+#n2c-panel .n2c-checks {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+    margin-top: 8px;
+}
+
+#n2c-panel .n2c-checks .checkbox_label {
     font-size: 11px;
-    padding: 2px 8px;
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
+    margin: 0;
+    white-space: nowrap;
+}
+
+#n2c-panel .n2c-card > .checkbox_label {
+    font-size: 11px;
+    margin-top: 8px;
+}
+
+/* ---------------- 进度 ---------------- */
+
+#n2c-panel .n2c-card-actions {
+    padding-top: 2px;
 }
 
 #n2c-panel .n2c-progress {
-    height: 6px;
+    height: 5px;
     border-radius: 3px;
     background: var(--color-border-tertiary, rgba(128, 128, 128, 0.2));
     overflow: hidden;
-    margin-top: 8px;
+    margin-top: 9px;
 }
 
 #n2c-panel .n2c-progress-bar {
     height: 100%;
     width: 0;
-    background: var(--n2c-accent, #b8336a);
+    background: var(--n2c-accent);
     transition: width 0.25s ease;
 }
 
@@ -99,11 +317,12 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+    margin-top: 8px;
 }
 
 #n2c-panel .n2c-char-row {
     display: grid;
-    grid-template-columns: auto minmax(80px, 1fr) minmax(100px, 1.4fr) auto;
+    grid-template-columns: auto minmax(70px, 1fr) minmax(90px, 1.3fr) auto auto;
     gap: 6px;
     align-items: center;
 }
@@ -155,7 +374,7 @@
 #n2c-panel .n2c-tier-lead {
     background: rgba(184, 51, 106, 0.18);
     border-color: rgba(184, 51, 106, 0.5);
-    color: var(--n2c-accent, #b8336a);
+    color: var(--n2c-accent);
     font-weight: 600;
 }
 
@@ -170,123 +389,6 @@
     opacity: 0.66;
 }
 
-#n2c-panel .n2c-char-row {
-    grid-template-columns: auto minmax(70px, 1fr) minmax(90px, 1.3fr) auto auto;
-}
-
-/* ---------------- 独立 API ---------------- */
-
-#n2c-panel .n2c-hr {
-    border: none;
-    border-top: 0.5px solid var(--color-border-tertiary, rgba(128, 128, 128, 0.25));
-    margin: 12px 0 8px;
-}
-
-#n2c-panel .n2c-api-config {
-    padding: 8px 10px;
-    border-radius: 6px;
-    background: var(--color-background-secondary, rgba(128, 128, 128, 0.07));
-    margin-bottom: 8px;
-}
-
-#n2c-panel .n2c-api-config code {
-    font-size: 10px;
-    padding: 0 3px;
-    border-radius: 2px;
-    background: rgba(128, 128, 128, 0.2);
-}
-
-#n2c-panel .menu_button.n2c-busy {
-    opacity: 0.55;
-    pointer-events: none;
-}
-
-/* ---------------- 结果 ---------------- */
-
-#n2c-panel .n2c-results {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-}
-
-#n2c-panel .n2c-result {
-    display: flex;
-    gap: 10px;
-    padding: 8px;
-    border-radius: 6px;
-    background: var(--color-background-secondary, rgba(128, 128, 128, 0.08));
-}
-
-#n2c-panel .n2c-result-avatar {
-    width: 56px;
-    height: 56px;
-    border-radius: 6px;
-    object-fit: cover;
-    flex-shrink: 0;
-}
-
-#n2c-panel .n2c-result-body {
-    flex: 1;
-    min-width: 0;
-}
-
-#n2c-panel .n2c-result-name {
-    font-weight: 600;
-    font-size: 13px;
-    margin-bottom: 2px;
-}
-
-#n2c-panel .n2c-result-stats {
-    font-size: 11px;
-    opacity: 0.72;
-    line-height: 1.55;
-    margin-bottom: 6px;
-    word-break: break-word;
-}
-
-#n2c-panel .n2c-result-actions {
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-}
-
-/* ---------------- 高级设置 ---------------- */
-
-#n2c-panel .n2c-subdrawer {
-    border: none;
-}
-
-#n2c-panel .n2c-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-    gap: 8px;
-    margin-bottom: 10px;
-}
-
-#n2c-panel .n2c-field {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    font-size: 11px;
-    opacity: 0.95;
-}
-
-#n2c-panel .n2c-field-wide {
-    margin-bottom: 8px;
-}
-
-#n2c-panel .n2c-checks {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px 14px;
-    margin-bottom: 10px;
-}
-
-#n2c-panel .n2c-checks .checkbox_label {
-    font-size: 11px;
-    margin: 0;
-}
-
 /* ---------------- 分卷列表 ---------------- */
 
 #n2c-panel .n2c-volume-list {
@@ -294,7 +396,7 @@
     flex-direction: column;
     gap: 3px;
     margin-top: 8px;
-    max-height: 260px;
+    max-height: 240px;
     overflow-y: auto;
 }
 
@@ -306,7 +408,7 @@
     padding: 5px 8px;
     border-radius: 5px;
     border: 0.5px solid transparent;
-    background: var(--color-background-secondary, rgba(128, 128, 128, 0.07));
+    background: var(--color-background-primary, rgba(128, 128, 128, 0.07));
     cursor: pointer;
     font-size: 11px;
     line-height: 1.5;
@@ -318,7 +420,7 @@
 }
 
 #n2c-panel .n2c-volume-active {
-    border-color: var(--n2c-accent, #b8336a);
+    border-color: var(--n2c-accent);
     background: rgba(184, 51, 106, 0.1);
 }
 
@@ -335,7 +437,7 @@
 }
 
 #n2c-panel .n2c-volume-active .n2c-volume-no {
-    background: var(--n2c-accent, #b8336a);
+    background: var(--n2c-accent);
     color: #fff;
 }
 
@@ -357,50 +459,154 @@
     white-space: nowrap;
 }
 
-/* ---------------- 主开关 ---------------- */
+/* ---------------- 独立 API ---------------- */
 
-#n2c-panel .n2c-head {
-    align-items: center;
+#n2c-panel .n2c-api-config {
+    margin-top: 9px;
+    padding: 9px 10px;
+    border-radius: 6px;
+    background: var(--color-background-primary, rgba(128, 128, 128, 0.07));
+    border: 0.5px dashed var(--color-border-secondary, rgba(128, 128, 128, 0.4));
 }
 
-#n2c-panel .n2c-head-actions {
+#n2c-panel .n2c-api-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 8px 10px;
+}
+
+#n2c-panel .n2c-api-grid .n2c-field-wide2 {
+    grid-column: span 2;
+}
+
+#n2c-panel .n2c-api-config code {
+    font-size: 10px;
+    padding: 0 3px;
+    border-radius: 2px;
+    background: rgba(128, 128, 128, 0.2);
+}
+
+/* ---------------- 结果 ---------------- */
+
+#n2c-panel .n2c-results {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+#n2c-panel .n2c-result {
+    display: flex;
+    gap: 10px;
+    padding: 8px;
+    border-radius: 6px;
+    background: var(--color-background-primary, rgba(128, 128, 128, 0.08));
+}
+
+#n2c-panel .n2c-result-avatar {
+    width: 54px;
+    height: 54px;
+    border-radius: 6px;
+    object-fit: cover;
+    flex-shrink: 0;
+}
+
+#n2c-panel .n2c-result-body {
+    flex: 1;
+    min-width: 0;
+}
+
+#n2c-panel .n2c-result-name {
+    font-weight: 600;
+    font-size: 13px;
+    margin-bottom: 2px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+#n2c-panel .n2c-result-stats {
+    font-size: 11px;
+    opacity: 0.72;
+    line-height: 1.55;
+    margin-bottom: 6px;
+    word-break: break-word;
+}
+
+#n2c-panel .n2c-result-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+/* ---------------- 存档 ---------------- */
+
+#n2c-panel .n2c-save-list,
+.n2c-window .n2c-save-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 8px;
+    max-height: 220px;
+    overflow-y: auto;
+}
+
+.n2c-save-row {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-left: auto;
+    padding: 6px 8px;
+    border-radius: 5px;
+    background: var(--color-background-primary, rgba(128, 128, 128, 0.08));
 }
 
-#n2c-panel .n2c-master {
-    margin: 0;
-    font-size: 11px;
-    gap: 4px;
+.n2c-save-main {
+    flex: 1;
+    min-width: 0;
 }
 
-#n2c-panel .n2c-disabled-badge {
-    font-size: 10px;
-    padding: 1px 6px;
-    border-radius: 3px;
-    opacity: 0.75;
-    background: rgba(192, 57, 43, 0.18);
-    border: 0.5px solid rgba(192, 57, 43, 0.4);
-    color: #c0392b;
+.n2c-save-name {
+    font-size: 12px;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
 }
 
-#n2c-panel.n2c-off .n2c-body {
-    opacity: 0.42;
-    filter: grayscale(0.6);
-    pointer-events: none;
-    user-select: none;
+.n2c-save-meta {
+    font-size: 10px;
+    opacity: 0.62;
 }
 
-#n2c-panel.n2c-off .n2c-body::after {
-    content: '插件已关闭 —— 勾选右上角「启用」后可继续使用';
-    display: block;
-    padding: 12px;
-    text-align: center;
-    font-size: 12px;
-    opacity: 0.9;
+/* ---------------- 日志 ---------------- */
+
+#n2c-panel .n2c-log {
+    max-height: 220px;
+    overflow-y: auto;
+    font-size: 11px;
+    line-height: 1.6;
+    padding: 7px 9px;
+    border-radius: 6px;
+    background: var(--color-background-primary, rgba(128, 128, 128, 0.08));
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+
+#n2c-panel .n2c-log-line {
+    display: flex;
+    gap: 6px;
+    word-break: break-word;
+}
+
+#n2c-panel .n2c-log-time {
+    opacity: 0.45;
+    flex-shrink: 0;
+}
+
+#n2c-panel .n2c-log-warn .n2c-log-text {
+    color: #d68910;
+}
+
+#n2c-panel .n2c-log-error .n2c-log-text {
+    color: #c0392b;
 }
 
 /* ---------------- 抽屉槽位 ---------------- */
@@ -477,7 +683,7 @@
     padding: 10px 12px 16px;
 }
 
-/* 窗口内的面板不再需要外层折叠头 */
+/* 窗口内不再需要外层折叠头 */
 .n2c-window-body #n2c-panel > .inline-drawer-header {
     display: none;
 }
@@ -490,82 +696,26 @@
     background: none;
 }
 
+/* 窄窗口（含手机）下标签页文字收起，只留图标，避免换行 */
+@media (max-width: 420px) {
+    #n2c-panel .n2c-tab span {
+        display: none;
+    }
+
+    #n2c-panel .n2c-tab {
+        padding: 6px 12px;
+    }
+
+    #n2c-panel .n2c-api-grid {
+        grid-template-columns: 1fr;
+    }
+
+    #n2c-panel .n2c-api-grid .n2c-field-wide2 {
+        grid-column: span 1;
+    }
+}
+
 /* 顶栏图标关闭态 */
 #n2c-drawer-icon.n2c-icon-off {
     opacity: 0.4;
-}
-
-/* ---------------- 存档列表 ---------------- */
-
-#n2c-panel .n2c-save-list,
-.n2c-window .n2c-save-list {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    margin-top: 8px;
-    max-height: 200px;
-    overflow-y: auto;
-}
-
-.n2c-save-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 8px;
-    border-radius: 5px;
-    background: var(--color-background-secondary, rgba(128, 128, 128, 0.08));
-}
-
-.n2c-save-main {
-    flex: 1;
-    min-width: 0;
-}
-
-.n2c-save-name {
-    font-size: 12px;
-    font-weight: 500;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.n2c-save-meta {
-    font-size: 10px;
-    opacity: 0.62;
-}
-
-/* ---------------- 日志 ---------------- */
-
-#n2c-panel .n2c-log-head {
-    justify-content: space-between;
-}
-
-#n2c-panel .n2c-log {
-    max-height: 190px;
-    overflow-y: auto;
-    font-size: 11px;
-    line-height: 1.6;
-    padding: 6px 8px;
-    border-radius: 6px;
-    background: var(--color-background-secondary, rgba(128, 128, 128, 0.08));
-    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
-}
-
-#n2c-panel .n2c-log-line {
-    display: flex;
-    gap: 6px;
-    word-break: break-word;
-}
-
-#n2c-panel .n2c-log-time {
-    opacity: 0.45;
-    flex-shrink: 0;
-}
-
-#n2c-panel .n2c-log-warn .n2c-log-text {
-    color: #d68910;
-}
-
-#n2c-panel .n2c-log-error .n2c-log-text {
-    color: #c0392b;
 }

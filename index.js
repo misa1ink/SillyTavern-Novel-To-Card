@@ -148,6 +148,8 @@ const state = {
     lastSaveId: null,
     lastSaveAt: 0,
     snapshotList: [],
+    // 界面
+    activeTab: 'work',
 };
 
 // ================================================================
@@ -231,232 +233,53 @@ function setRunning(running) {
 // 面板
 // ================================================================
 
+/** 标签页定义：常用流程放第一页，参数收进设置页，避免一屏堆二十多个控件 */
+const PANEL_TABS = [
+    { id: 'work', label: '转换', icon: 'fa-wand-magic-sparkles', title: '从小说正文到角色卡的主流程' },
+    { id: 'chars', label: '角色', icon: 'fa-users', title: '识别出的候选角色与分级结果' },
+    { id: 'settings', label: '设置', icon: 'fa-sliders', title: '模型、分卷、卡片与提示词参数' },
+    { id: 'data', label: '存档与日志', icon: 'fa-box-archive', title: '进度存档与运行日志' },
+];
+
+function renderTabsHtml(active) {
+    const buttons = PANEL_TABS.map(tab => `
+      <div class="n2c-tab${tab.id === active ? ' n2c-tab-active' : ''}"
+           data-tab="${tab.id}" title="${tab.title}" role="tab">
+        <i class="fa-solid ${tab.icon}"></i><span>${tab.label}</span>
+      </div>`).join('');
+    return `<div class="n2c-tabs" role="tablist">${buttons}</div>`;
+}
+
 function renderPanelHtml() {
     const s = getSettings();
+    const activeTab = state.activeTab || 'work';
+
     return `
 <div id="n2c-panel" class="inline-drawer${s.pluginEnabled ? '' : ' n2c-off'}">
   <div class="inline-drawer-toggle inline-drawer-header n2c-head">
     <b>小说转角色卡</b>
     <div class="n2c-head-actions">
-      <label class="checkbox_label n2c-master" title="关闭后扩展不响应任何操作，面板置灰">
+      <span class="n2c-disabled-badge" id="n2c-disabled-badge" style="${s.pluginEnabled ? 'display:none' : ''}">已关闭</span>
+      <label class="checkbox_label n2c-master" title="关闭后扩展不响应任何操作，顶栏入口一并隐藏">
         <input type="checkbox" id="n2c-plugin-enabled" ${s.pluginEnabled ? 'checked' : ''}>
         <span>启用</span>
       </label>
       <div class="menu_button n2c-small" id="n2c-open-window" title="在独立浮动窗口中打开">
-        <i class="fa-solid fa-up-right-and-down-left-from-center"></i> 独立窗口
+        <i class="fa-solid fa-up-right-and-down-left-from-center"></i>
       </div>
-      <span class="n2c-disabled-badge" id="n2c-disabled-badge" style="${s.pluginEnabled ? 'display:none' : ''}">已关闭（顶栏入口已隐藏）</span>
       <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
     </div>
   </div>
   <div class="inline-drawer-content">
     <div id="n2c-body" class="n2c-body">
+      ${renderTabsHtml(activeTab)}
 
-    <div class="n2c-section">
-      <div class="n2c-label">1. 小说文本</div>
-      <div class="n2c-row">
-        <input type="text" id="n2c-title" class="text_pole n2c-grow" placeholder="作品名（可选，用于提示词）">
-        <label class="n2c-file-btn menu_button" title="支持 .txt / .md / .jsonl">
-          <i class="fa-solid fa-file-import"></i> 选择文件
-          <input type="file" id="n2c-file" accept=".txt,.md,.jsonl,.text,text/plain" hidden>
-        </label>
-        <div class="menu_button" id="n2c-clear-text" title="清空已载入的文本"><i class="fa-solid fa-trash-can"></i></div>
+      <div class="n2c-tabpanes">
+${renderTabWork(s)}
+${renderTabChars(s)}
+${renderTabSettings(s)}
+${renderTabData(s)}
       </div>
-      <textarea id="n2c-text" class="text_pole n2c-textarea" rows="6" placeholder="在此粘贴小说正文，或点右上角选择文件（建议单次不超过 30 万字）"></textarea>
-      <div class="n2c-hint" id="n2c-text-info">未载入文本</div>
-    </div>
-
-    <div class="n2c-section">
-      <div class="inline-drawer n2c-subdrawer">
-        <div class="inline-drawer-toggle inline-drawer-header">
-          <b>1.5 分卷（长篇小说强烈建议）</b>
-          <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
-        </div>
-        <div class="inline-drawer-content">
-          <div class="n2c-checks">
-            <label class="checkbox_label"><input type="checkbox" id="n2c-split-enabled" ${s.splitEnabled ? 'checked' : ''}><span>启用分卷</span></label>
-            <label class="checkbox_label"><input type="checkbox" id="n2c-split-by-chapter" ${s.splitByChapter ? 'checked' : ''}><span>优先按章节边界切（不切在句子中间）</span></label>
-          </div>
-
-          <div class="n2c-grid">
-            <label class="n2c-field"><span>分卷方式</span>
-              <select id="n2c-split-mode" class="text_pole">
-                <option value="auto" ${s.splitMode === 'auto' ? 'selected' : ''}>按每卷字数</option>
-                <option value="count" ${s.splitMode === 'count' ? 'selected' : ''}>按固定卷数</option>
-              </select></label>
-            <label class="n2c-field" id="n2c-split-count-field"><span>卷数</span>
-              <input type="number" id="n2c-volume-count" class="text_pole" min="1" max="200" step="1" value="${s.volumeCount}"></label>
-            <label class="n2c-field" id="n2c-split-size-field"><span>每卷字数</span>
-              <input type="number" id="n2c-chars-per-volume" class="text_pole" min="1000" max="3000000" step="10000" value="${s.charsPerVolume}"></label>
-          </div>
-
-          <div class="n2c-row">
-            <div class="menu_button n2c-primary" id="n2c-preview-split"><i class="fa-solid fa-scissors"></i> 预览分卷</div>
-            <div class="menu_button n2c-small" id="n2c-clear-split" style="display:none"><i class="fa-solid fa-xmark"></i> 取消分卷</div>
-          </div>
-          <div class="n2c-hint" id="n2c-split-info">尚未分卷。分卷后「分析人物」「生成角色卡」只处理当前卷。</div>
-          <div id="n2c-volume-list" class="n2c-volume-list"></div>
-        </div>
-      </div>
-    </div>
-
-    <div class="n2c-section">
-      <div class="n2c-row">
-        <div class="menu_button n2c-primary" id="n2c-analyze"><i class="fa-solid fa-user-magnifying-glass"></i> 分析人物</div>
-        <div class="menu_button" id="n2c-generate"><i class="fa-solid fa-id-card"></i> 生成角色卡</div>
-        <div class="menu_button" id="n2c-make-world"><i class="fa-solid fa-book-atlas"></i> 只生成世界书</div>
-        <div class="menu_button n2c-danger" id="n2c-cancel" style="display:none"><i class="fa-solid fa-ban"></i> 中止</div>
-      </div>
-      <div class="n2c-progress"><div class="n2c-progress-bar" id="n2c-progress-bar"></div></div>
-      <div class="n2c-hint" id="n2c-progress-text"></div>
-    </div>
-
-    <div class="n2c-section">
-      <div class="n2c-label">2. 识别到的角色 <span class="n2c-hint-inline">（可改名字、取消勾选）</span></div>
-      <div class="n2c-row">
-        <div class="menu_button n2c-small" id="n2c-classify" title="让模型判定谁是主角、谁是配角"><i class="fa-solid fa-ranking-star"></i> 判定主角/配角</div>
-        <span class="n2c-hint-inline" id="n2c-tier-summary"></span>
-      </div>
-      <div id="n2c-chars" class="n2c-chars"></div>
-    </div>
-
-    <div class="n2c-section">
-      <div class="n2c-label">3. 结果</div>
-      <div id="n2c-results" class="n2c-results"><div class="n2c-hint">尚未生成任何角色卡。</div></div>
-    </div>
-
-    <div class="n2c-section">
-      <div class="inline-drawer n2c-subdrawer">
-        <div class="inline-drawer-toggle inline-drawer-header">
-          <b>高级设置</b>
-          <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
-        </div>
-        <div class="inline-drawer-content">
-          <div class="n2c-grid">
-            <label class="n2c-field"><span>分段字数</span>
-              <input type="number" id="n2c-chunk-chars" class="text_pole" min="1500" max="20000" step="500" value="${s.chunkChars}"></label>
-            <label class="n2c-field"><span>请求并发</span>
-              <input type="number" id="n2c-concurrency" class="text_pole" min="1" max="8" step="1" value="${s.concurrency}"></label>
-            <label class="n2c-field"><span>最多角色数</span>
-              <input type="number" id="n2c-max-chars" class="text_pole" min="1" max="40" step="1" value="${s.maxCharacters}"></label>
-            <label class="n2c-field"><span>每角色证据段数</span>
-              <input type="number" id="n2c-evidence" class="text_pole" min="1" max="20" step="1" value="${s.evidenceChunks}"></label>
-            <label class="n2c-field"><span>角色卡版本</span>
-              <select id="n2c-card-version" class="text_pole">
-                <option value="3" ${s.cardVersion === '3' ? 'selected' : ''}>V3（推荐）</option>
-                <option value="2" ${s.cardVersion === '2' ? 'selected' : ''}>V2</option>
-                <option value="both" ${s.cardVersion === 'both' ? 'selected' : ''}>两者都要</option>
-              </select></label>
-            <label class="n2c-field"><span>头像最长边(px)</span>
-              <input type="number" id="n2c-avatar-size" class="text_pole" min="128" max="1024" step="64" value="${s.avatarMaxSize}"></label>
-          </div>
-
-          <div class="n2c-checks">
-            <label class="checkbox_label"><input type="checkbox" id="n2c-with-world" ${s.withWorldBook ? 'checked' : ''}><span>同时提取世界书</span></label>            <label class="checkbox_label"><input type="checkbox" id="n2c-embed-world" ${s.embedWorldBook ? 'checked' : ''}><span>世界书内嵌进角色卡</span></label>
-            <label class="checkbox_label"><input type="checkbox" id="n2c-save-world-file" ${s.saveWorldBookFile ? 'checked' : ''}><span>额外导出世界书 JSON</span></label>
-            <label class="checkbox_label"><input type="checkbox" id="n2c-import" ${s.importToTavern ? 'checked' : ''}><span>自动导入到角色列表</span></label>
-            <label class="checkbox_label"><input type="checkbox" id="n2c-placeholder" ${s.placeholderAvatar ? 'checked' : ''}><span>没有底图时生成占位头像</span></label>
-            <label class="checkbox_label"><input type="checkbox" id="n2c-resize-avatar" ${s.resizeAvatar ? 'checked' : ''}><span>缩放并重建底图（会转成 PNG）</span></label>
-            <label class="checkbox_label"><input type="checkbox" id="n2c-auto-tag" ${s.autoTag ? 'checked' : ''}><span>自动写入标签</span></label>
-          </div>
-
-          <div class="n2c-field n2c-field-wide"><span>世界书条目数上限（0 = 由模型决定）</span>
-            <input type="number" id="n2c-world-count" class="text_pole" min="0" max="60" step="1" value="${s.worldEntryCount}"></div>
-
-          <hr class="n2c-hr">
-          <div class="n2c-label">角色分级</div>
-          <div class="n2c-checks">
-            <label class="checkbox_label"><input type="checkbox" id="n2c-tier-enabled" ${s.tierEnabled ? 'checked' : ''}><span>区分主角与配角</span></label>
-            <label class="checkbox_label"><input type="checkbox" id="n2c-brief-supporting" ${s.briefSupporting ? 'checked' : ''}><span>配角用精简档案</span></label>
-          </div>
-          <div class="n2c-grid">
-            <label class="n2c-field"><span>主角最多几个</span>
-              <input type="number" id="n2c-max-protagonists" class="text_pole" min="1" max="20" step="1" value="${s.maxProtagonists}"></label>
-            <label class="n2c-field"><span>配角最多几个</span>
-              <input type="number" id="n2c-max-supporting" class="text_pole" min="0" max="40" step="1" value="${s.maxSupporting}"></label>
-          </div>
-          <div class="n2c-hint">分级后按「主角 → 主要配角 → 次要配角」排序，各自按上限取用。配角用精简档案能省一半输出 token，也让卡片更干净。</div>
-
-          <hr class="n2c-hr">
-          <div class="n2c-label">模型通道</div>
-          <label class="n2c-field n2c-field-wide"><span>用哪个通道分析</span>
-            <select id="n2c-api-client" class="text_pole">
-              <option value="tavern" ${s.apiClient === 'tavern' ? 'selected' : ''}>酒馆当前连接</option>
-              <option value="custom" ${s.apiClient === 'custom' ? 'selected' : ''}>独立 API（自己填地址和模型）</option>
-            </select></label>
-
-          <div id="n2c-api-config" class="n2c-api-config">
-            <label class="n2c-field n2c-field-wide"><span>接口地址（填到版本段即可，如 https://api.deepseek.com/v1）</span>
-              <input type="text" id="n2c-api-url" class="text_pole" placeholder="https://api.deepseek.com/v1" value="${escapeHtml(s.apiUrl)}"></label>
-            <label class="n2c-field n2c-field-wide"><span>API Key</span>
-              <input type="password" id="n2c-api-key" class="text_pole" placeholder="sk-..." value="${escapeHtml(s.apiKey)}"></label>
-            <div class="n2c-grid">
-              <label class="n2c-field"><span>模型名</span>
-                <input type="text" id="n2c-api-model" class="text_pole" placeholder="deepseek-chat" value="${escapeHtml(s.apiModel)}"></label>
-              <label class="n2c-field"><span>temperature</span>
-                <input type="number" id="n2c-api-temperature" class="text_pole" min="0" max="2" step="0.1" placeholder="跟随默认" value="${escapeHtml(s.apiTemperature)}"></label>
-              <label class="n2c-field"><span>top_p</span>
-                <input type="number" id="n2c-api-top-p" class="text_pole" min="0" max="1" step="0.05" placeholder="跟随默认" value="${escapeHtml(s.apiTopP)}"></label>
-            </div>
-            <div class="n2c-checks">
-              <label class="checkbox_label"><input type="checkbox" id="n2c-api-stream" ${s.apiStream ? 'checked' : ''}><span>流式请求</span></label>
-            </div>
-            <div class="n2c-row">
-              <div class="menu_button n2c-small" id="n2c-api-test"><i class="fa-solid fa-plug-circle-check"></i> 测试连接</div>
-              <span class="n2c-hint" id="n2c-api-test-result"></span>
-            </div>
-            <div class="n2c-hint">提示：独立 API 走酒馆后端转发，请求与普通生成同源。Key 只保存在本地设置里，不会上传。若用中转站，地址填到版本段即可，服务端会自己拼 <code>/chat/completions</code>。</div>
-          </div>
-
-          <div class="n2c-field n2c-field-wide"><span>底图（可选，作为所有角色卡的初始头像）</span>
-            <div class="n2c-row">
-              <label class="n2c-file-btn menu_button"><i class="fa-solid fa-image"></i> 选择图片
-                <input type="file" id="n2c-avatar-file" accept="image/*" hidden></label>
-              <div class="menu_button" id="n2c-avatar-clear"><i class="fa-solid fa-xmark"></i> 清除</div>
-              <span class="n2c-hint" id="n2c-avatar-info">未选择</span>
-            </div>
-          </div>
-
-          <div class="n2c-field n2c-field-wide"><span>额外提示词（追加到每个角色的提取要求里）</span>
-            <textarea id="n2c-instruction" class="text_pole n2c-textarea" rows="3" placeholder="例如：保留原著的口癖；主角的性别按原文推断，不要默认男性">${escapeHtml(s.extraInstruction)}</textarea></div>
-
-          <div class="n2c-field n2c-field-wide"><span>作者署名 / 版本号</span>
-            <div class="n2c-row">
-              <input type="text" id="n2c-creator" class="text_pole n2c-grow" value="${escapeHtml(s.creatorName)}">
-              <input type="text" id="n2c-version-tag" class="text_pole" style="max-width:110px" value="${escapeHtml(s.cardVersionTag)}">
-            </div>
-          </div>
-
-          <div class="n2c-row">
-            <div class="menu_button" id="n2c-read-card"><i class="fa-solid fa-file-shield"></i> 读取已有角色卡 PNG</div>
-            <input type="file" id="n2c-card-file" accept=".png,image/png" hidden>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="n2c-section">
-      <div class="n2c-row n2c-log-head">
-        <div class="n2c-label">存档与进度</div>
-        <div class="menu_button n2c-small" id="n2c-save-now"><i class="fa-solid fa-floppy-disk"></i> 立即存档</div>
-      </div>
-      <div class="n2c-row">
-        <input type="text" id="n2c-save-name" class="text_pole n2c-grow" placeholder="存档名（留空自动取名）">
-        <label class="checkbox_label"><input type="checkbox" id="n2c-autosave" ${s.autoSave ? 'checked' : ''}><span>自动存档</span></label>
-        <div class="menu_button n2c-small" id="n2c-refresh-saves"><i class="fa-solid fa-rotate"></i> 刷新</div>
-      </div>
-      <div class="n2c-hint" id="n2c-save-info">进度存在浏览器 IndexedDB 里，重开酒馆后可从这里恢复。</div>
-      <div id="n2c-save-list" class="n2c-save-list"></div>
-    </div>
-
-    <div class="n2c-section">
-      <div class="n2c-row n2c-log-head">
-        <div class="n2c-label">运行日志</div>
-        <div class="menu_button n2c-small" id="n2c-clear-log">清空</div>
-      </div>
-      <div id="n2c-log" class="n2c-log"></div>
-    </div>
-
     </div>
     <div id="n2c-drawer-slot" class="n2c-drawer-slot">
       <div class="n2c-hint">
@@ -466,6 +289,260 @@ function renderPanelHtml() {
     </div>
   </div>
 </div>`;
+}
+
+/** 转换页：载入 → 分卷 → 执行 → 结果，一屏走完主流程 */
+function renderTabWork(s) {
+    return `
+<div class="n2c-pane" data-pane="work">
+  <div class="n2c-card">
+    <div class="n2c-card-head"><i class="fa-solid fa-book"></i> 小说文本</div>
+    <div class="n2c-row">
+      <input type="text" id="n2c-title" class="text_pole n2c-grow" placeholder="作品名（可选，用于提示词）">
+      <label class="n2c-file-btn menu_button" title="支持 .txt / .md / .jsonl">
+        <i class="fa-solid fa-file-import"></i> 选择文件
+        <input type="file" id="n2c-file" accept=".txt,.md,.jsonl,.text,text/plain" hidden>
+      </label>
+      <div class="menu_button n2c-icon-btn" id="n2c-clear-text" title="清空已载入的文本"><i class="fa-solid fa-trash-can"></i></div>
+    </div>
+    <textarea id="n2c-text" class="text_pole n2c-textarea" rows="5" placeholder="在此粘贴小说正文，或点上方选择文件"></textarea>
+    <div class="n2c-hint" id="n2c-text-info">未载入文本</div>
+  </div>
+
+  <div class="n2c-card">
+    <div class="n2c-card-head">
+      <i class="fa-solid fa-scissors"></i> 分卷
+      <label class="checkbox_label n2c-head-check" title="长篇强烈建议开启">
+        <input type="checkbox" id="n2c-split-enabled" ${s.splitEnabled ? 'checked' : ''}><span>启用</span>
+      </label>
+    </div>
+    <div class="n2c-row">
+      <div class="menu_button n2c-primary n2c-small" id="n2c-preview-split"><i class="fa-solid fa-scissors"></i> 预览分卷</div>
+      <div class="menu_button n2c-small" id="n2c-clear-split" style="display:none"><i class="fa-solid fa-xmark"></i> 取消分卷</div>
+      <span class="n2c-hint-inline" id="n2c-split-summary"></span>
+    </div>
+    <div class="n2c-hint" id="n2c-split-info">尚未分卷。分卷后分析与生成只处理当前卷。</div>
+    <div id="n2c-volume-list" class="n2c-volume-list"></div>
+  </div>
+
+  <div class="n2c-card n2c-card-actions">
+    <div class="n2c-row n2c-row-actions">
+      <div class="menu_button n2c-primary" id="n2c-analyze"><i class="fa-solid fa-user-magnifying-glass"></i> 分析人物</div>
+      <div class="menu_button" id="n2c-generate"><i class="fa-solid fa-id-card"></i> 生成角色卡</div>
+      <div class="menu_button n2c-small" id="n2c-make-world"><i class="fa-solid fa-book-atlas"></i> 只生成世界书</div>
+      <div class="menu_button n2c-danger n2c-small" id="n2c-cancel" style="display:none"><i class="fa-solid fa-ban"></i> 中止</div>
+    </div>
+    <div class="n2c-progress"><div class="n2c-progress-bar" id="n2c-progress-bar"></div></div>
+    <div class="n2c-hint" id="n2c-progress-text"></div>
+  </div>
+
+  <div class="n2c-card">
+    <div class="n2c-card-head"><i class="fa-solid fa-id-card"></i> 生成结果 <span class="n2c-count" id="n2c-result-count"></span></div>
+    <div id="n2c-results" class="n2c-results"><div class="n2c-hint">尚未生成任何角色卡。</div></div>
+  </div>
+</div>`;
+}
+
+/** 角色页：候选列表 + 分级 */
+function renderTabChars(s) {
+    return `
+<div class="n2c-pane" data-pane="chars">
+  <div class="n2c-card">
+    <div class="n2c-card-head">
+      <i class="fa-solid fa-users"></i> 候选角色
+      <div class="n2c-card-actions">
+        <div class="menu_button n2c-small" id="n2c-classify" title="让模型判定谁是主角、谁是配角">
+          <i class="fa-solid fa-ranking-star"></i> 判定主角/配角
+        </div>
+      </div>
+    </div>
+    <div class="n2c-hint" id="n2c-tier-summary">还没有识别结果，请先到「转换」页点「分析人物」。</div>
+    <div id="n2c-chars" class="n2c-chars"></div>
+  </div>
+</div>`;
+}
+
+/** 设置页：每类参数一张卡片，独立 API 单独成块 */
+function renderTabSettings(s) {
+    return `
+<div class="n2c-pane" data-pane="settings">
+
+  <div class="n2c-card">
+    <div class="n2c-card-head"><i class="fa-solid fa-plug"></i> 模型来源</div>
+    <div class="n2c-row">
+      <label class="n2c-field n2c-grow"><span>用哪个通道分析</span>
+        <select id="n2c-api-client" class="text_pole">
+          <option value="tavern" ${s.apiClient === 'tavern' ? 'selected' : ''}>酒馆当前连接</option>
+          <option value="custom" ${s.apiClient === 'custom' ? 'selected' : ''}>独立 API（自己填地址和模型）</option>
+        </select></label>
+    </div>
+
+    <div id="n2c-api-config" class="n2c-api-config">
+      <div class="n2c-api-grid">
+        <label class="n2c-field n2c-field-wide2"><span>接口地址</span>
+          <input type="text" id="n2c-api-url" class="text_pole" placeholder="https://api.deepseek.com/v1" value="${escapeHtml(s.apiUrl)}"></label>
+        <label class="n2c-field"><span>模型名</span>
+          <input type="text" id="n2c-api-model" class="text_pole" placeholder="deepseek-chat" value="${escapeHtml(s.apiModel)}"></label>
+        <label class="n2c-field n2c-field-wide2"><span>API Key</span>
+          <input type="password" id="n2c-api-key" class="text_pole" placeholder="sk-..." value="${escapeHtml(s.apiKey)}"></label>
+        <label class="n2c-field"><span>temperature</span>
+          <input type="number" id="n2c-api-temperature" class="text_pole" min="0" max="2" step="0.1" placeholder="默认" value="${escapeHtml(s.apiTemperature)}"></label>
+        <label class="n2c-field"><span>top_p</span>
+          <input type="number" id="n2c-api-top-p" class="text_pole" min="0" max="1" step="0.05" placeholder="默认" value="${escapeHtml(s.apiTopP)}"></label>
+      </div>
+      <div class="n2c-row">
+        <label class="checkbox_label"><input type="checkbox" id="n2c-api-stream" ${s.apiStream ? 'checked' : ''}><span>流式请求</span></label>
+        <div class="menu_button n2c-small" id="n2c-api-test"><i class="fa-solid fa-plug-circle-check"></i> 测试连接</div>
+      </div>
+      <div class="n2c-hint" id="n2c-api-test-result"></div>
+      <div class="n2c-hint">地址填到版本段即可（如 <code>https://api.deepseek.com/v1</code>），服务端会自己拼 <code>/chat/completions</code>。请求经酒馆后端转发，与普通生成同源；Key 只存在本地设置里。</div>
+    </div>
+  </div>
+
+  <div class="n2c-card">
+    <div class="n2c-card-head"><i class="fa-solid fa-sliders"></i> 分析参数</div>
+    <div class="n2c-grid">
+      <label class="n2c-field"><span>分段字数</span>
+        <input type="number" id="n2c-chunk-chars" class="text_pole" min="1500" max="20000" step="500" value="${s.chunkChars}"></label>
+      <label class="n2c-field"><span>请求并发</span>
+        <input type="number" id="n2c-concurrency" class="text_pole" min="1" max="8" step="1" value="${s.concurrency}"></label>
+      <label class="n2c-field"><span>最多角色数</span>
+        <input type="number" id="n2c-max-chars" class="text_pole" min="1" max="40" step="1" value="${s.maxCharacters}"></label>
+      <label class="n2c-field"><span>每角色证据段数</span>
+        <input type="number" id="n2c-evidence" class="text_pole" min="1" max="20" step="1" value="${s.evidenceChunks}"></label>
+    </div>
+  </div>
+
+  <div class="n2c-card">
+    <div class="n2c-card-head"><i class="fa-solid fa-scissors"></i> 分卷参数</div>
+    <div class="n2c-grid">
+      <label class="n2c-field"><span>分卷方式</span>
+        <select id="n2c-split-mode" class="text_pole">
+          <option value="auto" ${s.splitMode === 'auto' ? 'selected' : ''}>按每卷字数</option>
+          <option value="count" ${s.splitMode === 'count' ? 'selected' : ''}>按固定卷数</option>
+        </select></label>
+      <label class="n2c-field" id="n2c-split-count-field"><span>卷数</span>
+        <input type="number" id="n2c-volume-count" class="text_pole" min="1" max="200" step="1" value="${s.volumeCount}"></label>
+      <label class="n2c-field" id="n2c-split-size-field"><span>每卷字数</span>
+        <input type="number" id="n2c-chars-per-volume" class="text_pole" min="1000" max="3000000" step="10000" value="${s.charsPerVolume}"></label>
+    </div>
+    <label class="checkbox_label"><input type="checkbox" id="n2c-split-by-chapter" ${s.splitByChapter ? 'checked' : ''}><span>优先按章节边界切（不切在句子中间）</span></label>
+  </div>
+
+  <div class="n2c-card">
+    <div class="n2c-card-head"><i class="fa-solid fa-ranking-star"></i> 角色分级</div>
+    <div class="n2c-row">
+      <label class="checkbox_label"><input type="checkbox" id="n2c-tier-enabled" ${s.tierEnabled ? 'checked' : ''}><span>区分主角与配角</span></label>
+      <label class="checkbox_label"><input type="checkbox" id="n2c-brief-supporting" ${s.briefSupporting ? 'checked' : ''}><span>配角用精简档案</span></label>
+    </div>
+    <div class="n2c-grid">
+      <label class="n2c-field"><span>主角最多几个</span>
+        <input type="number" id="n2c-max-protagonists" class="text_pole" min="1" max="20" step="1" value="${s.maxProtagonists}"></label>
+      <label class="n2c-field"><span>配角最多几个</span>
+        <input type="number" id="n2c-max-supporting" class="text_pole" min="0" max="40" step="1" value="${s.maxSupporting}"></label>
+    </div>
+    <div class="n2c-hint">按「主角 → 主要配角 → 次要配角」排序，各自按上限取用。配角用精简档案能省一半输出 token。</div>
+  </div>
+
+  <div class="n2c-card">
+    <div class="n2c-card-head"><i class="fa-solid fa-id-card"></i> 卡片输出</div>
+    <div class="n2c-grid">
+      <label class="n2c-field"><span>角色卡版本</span>
+        <select id="n2c-card-version" class="text_pole">
+          <option value="3" ${s.cardVersion === '3' ? 'selected' : ''}>V3（推荐）</option>
+          <option value="2" ${s.cardVersion === '2' ? 'selected' : ''}>V2</option>
+          <option value="both" ${s.cardVersion === 'both' ? 'selected' : ''}>两者都要</option>
+        </select></label>
+      <label class="n2c-field"><span>头像最长边(px)</span>
+        <input type="number" id="n2c-avatar-size" class="text_pole" min="128" max="1024" step="64" value="${s.avatarMaxSize}"></label>
+      <label class="n2c-field"><span>世界书条目上限</span>
+        <input type="number" id="n2c-world-count" class="text_pole" min="0" max="60" step="1" value="${s.worldEntryCount}"></label>
+    </div>
+    <div class="n2c-checks">
+      <label class="checkbox_label"><input type="checkbox" id="n2c-with-world" ${s.withWorldBook ? 'checked' : ''}><span>提取世界书</span></label>
+      <label class="checkbox_label"><input type="checkbox" id="n2c-embed-world" ${s.embedWorldBook ? 'checked' : ''}><span>世界书内嵌进卡</span></label>
+      <label class="checkbox_label"><input type="checkbox" id="n2c-save-world-file" ${s.saveWorldBookFile ? 'checked' : ''}><span>导出世界书 JSON</span></label>
+      <label class="checkbox_label"><input type="checkbox" id="n2c-import" ${s.importToTavern ? 'checked' : ''}><span>自动导入角色列表</span></label>
+      <label class="checkbox_label"><input type="checkbox" id="n2c-placeholder" ${s.placeholderAvatar ? 'checked' : ''}><span>生成占位头像</span></label>
+      <label class="checkbox_label"><input type="checkbox" id="n2c-resize-avatar" ${s.resizeAvatar ? 'checked' : ''}><span>缩放并重建底图</span></label>
+      <label class="checkbox_label"><input type="checkbox" id="n2c-auto-tag" ${s.autoTag ? 'checked' : ''}><span>自动写入标签</span></label>
+    </div>
+    <div class="n2c-field n2c-field-wide"><span>底图（可选，作为所有角色卡的初始头像）</span>
+      <div class="n2c-row">
+        <label class="n2c-file-btn menu_button n2c-small"><i class="fa-solid fa-image"></i> 选择图片
+          <input type="file" id="n2c-avatar-file" accept="image/*" hidden></label>
+        <div class="menu_button n2c-small" id="n2c-avatar-clear"><i class="fa-solid fa-xmark"></i> 清除</div>
+        <span class="n2c-hint" id="n2c-avatar-info">未选择</span>
+      </div>
+    </div>
+    <div class="n2c-field n2c-field-wide"><span>作者署名 / 版本号</span>
+      <div class="n2c-row">
+        <input type="text" id="n2c-creator" class="text_pole n2c-grow" value="${escapeHtml(s.creatorName)}">
+        <input type="text" id="n2c-version-tag" class="text_pole" style="max-width:110px" value="${escapeHtml(s.cardVersionTag)}">
+      </div>
+    </div>
+    <div class="n2c-row">
+      <div class="menu_button n2c-small" id="n2c-read-card"><i class="fa-solid fa-file-shield"></i> 读取已有角色卡 PNG 作为底图</div>
+      <input type="file" id="n2c-card-file" accept=".png,image/png" hidden>
+    </div>
+  </div>
+
+  <div class="n2c-card">
+    <div class="n2c-card-head"><i class="fa-solid fa-comment-dots"></i> 额外提示词</div>
+    <textarea id="n2c-instruction" class="text_pole n2c-textarea" rows="3" placeholder="例如：保留原著的口癖；主角的性别按原文推断，不要默认男性">${escapeHtml(s.extraInstruction)}</textarea>
+    <div class="n2c-hint">会追加到每个角色的提取要求里。</div>
+  </div>
+</div>`;
+}
+
+/** 存档与日志页 */
+function renderTabData(s) {
+    return `
+<div class="n2c-pane" data-pane="data">
+  <div class="n2c-card">
+    <div class="n2c-card-head">
+      <i class="fa-solid fa-floppy-disk"></i> 存档与进度
+      <div class="n2c-card-actions">
+        <label class="checkbox_label n2c-head-check"><input type="checkbox" id="n2c-autosave" ${s.autoSave ? 'checked' : ''}><span>自动存档</span></label>
+        <div class="menu_button n2c-small" id="n2c-save-now"><i class="fa-solid fa-floppy-disk"></i> 立即存档</div>
+        <div class="menu_button n2c-small n2c-icon-btn" id="n2c-refresh-saves" title="刷新列表"><i class="fa-solid fa-rotate"></i></div>
+      </div>
+    </div>
+    <div class="n2c-row">
+      <input type="text" id="n2c-save-name" class="text_pole n2c-grow" placeholder="存档名（留空自动取名）">
+    </div>
+    <div class="n2c-hint" id="n2c-save-info">进度存在浏览器 IndexedDB 里，重开酒馆后可从这里恢复。</div>
+    <div id="n2c-save-list" class="n2c-save-list"></div>
+  </div>
+
+  <div class="n2c-card">
+    <div class="n2c-card-head">
+      <i class="fa-solid fa-terminal"></i> 运行日志
+      <div class="n2c-card-actions">
+        <div class="menu_button n2c-small" id="n2c-clear-log">清空</div>
+      </div>
+    </div>
+    <div id="n2c-log" class="n2c-log"></div>
+  </div>
+</div>`;
+}
+
+/** 切换标签页 */
+function switchTab(tabId) {
+    state.activeTab = tabId;
+    const panel = $id('n2c-panel');
+    if (!panel) return;
+    for (const tab of panel.querySelectorAll('.n2c-tab')) {
+        tab.classList.toggle('n2c-tab-active', tab.dataset.tab === tabId);
+    }
+    for (const pane of panel.querySelectorAll('.n2c-pane')) {
+        pane.classList.toggle('n2c-pane-active', pane.dataset.pane === tabId);
+    }
+}
+
+/** 按初始状态摆好标签页（HTML 里所有面板都在，靠类控制显隐） */
+function initTabs() {
+    switchTab(state.activeTab || 'work');
 }
 
 function mountPanel() {
@@ -480,6 +557,7 @@ function mountPanel() {
     state.panelBody = $id('n2c-body');
     bindPanelEvents();
     bindPanelHeaderEvents();
+    initTabs();
     mountTopbarDrawer();
     applyEnabledState();
     renderCharacterList();
@@ -737,6 +815,14 @@ function bindPanelHeaderEvents() {
     $id('n2c-open-window')?.addEventListener('click', () => {
         if (!requireEnabled()) return;
         openFloatingWindow();
+    });
+
+    // 标签页：事件委托到面板容器，切页后无需重绑
+    const panel = $id('n2c-panel');
+    panel?.addEventListener('click', event => {
+        const tab = event.target?.closest?.('.n2c-tab');
+        if (!tab || !panel.contains(tab)) return;
+        switchTab(tab.dataset.tab);
     });
 }
 
@@ -1125,15 +1211,17 @@ function previewSplit() {
 function renderVolumeList() {
     const host = $id('n2c-volume-list');
     const info = $id('n2c-split-info');
+    const summary = $id('n2c-split-summary');
     const clearButton = $id('n2c-clear-split');
     if (!host) return;
 
     if (!state.volumes.length) {
         host.innerHTML = '';
+        if (summary) summary.textContent = '';
         if (info) {
             info.textContent = getSettings().splitEnabled
                 ? '已启用分卷但还没预览。点「预览分卷」查看切分结果。'
-                : '尚未分卷。分卷后「分析人物」「生成角色卡」只处理当前卷。';
+                : '尚未分卷。分卷后分析与生成只处理当前卷。';
         }
         if (clearButton) clearButton.style.display = 'none';
         return;
@@ -1142,10 +1230,15 @@ function renderVolumeList() {
     const settings = getSettings();
     const chunkChars = Math.max(1500, Number(settings.chunkChars) || 6000);
     const totalChars = state.volumes.reduce((sum, volume) => sum + volume.chars, 0);
+    const current = state.volumes[state.volumeIndex];
 
+    if (summary) {
+        summary.textContent = `共 ${state.volumes.length} 卷 / ${totalChars.toLocaleString()} 字`;
+    }
     if (info) {
-        info.textContent = `共 ${state.volumes.length} 卷 / ${totalChars.toLocaleString()} 字。`
-            + '分析、生成都只作用于当前选中的卷——逐卷跑完再合并，比一次喂全书稳得多。';
+        info.textContent = current
+            ? `当前：${current.label}${current.title ? `「${current.title}」` : ''}（${current.chars.toLocaleString()} 字）。点列表切换，分析生成只作用于当前卷。`
+            : '点下面的列表切换当前卷。';
     }
     if (clearButton) clearButton.style.display = '';
 
@@ -1269,6 +1362,9 @@ function selectedCharacters() {
 function renderResults() {
     const host = $id('n2c-results');
     if (!host) return;
+
+    const counter = $id('n2c-result-count');
+    if (counter) counter.textContent = state.profiles.length ? `${state.profiles.length} 张` : '';
 
     if (!state.profiles.length) {
         host.innerHTML = '<div class="n2c-hint">尚未生成任何角色卡。</div>';
@@ -1720,12 +1816,14 @@ function countTiers() {
 function updateTierSummary() {
     const summary = $id('n2c-tier-summary');
     if (!summary) return;
-    if (!getSettings().tierEnabled) {
-        summary.textContent = '（分级已关闭）';
+
+    if (!state.characters.length) {
+        summary.textContent = '还没有识别结果，请先到「转换」页点「分析人物」。';
         return;
     }
-    if (!state.characters.length) {
-        summary.textContent = '';
+    if (!getSettings().tierEnabled) {
+        const selected = state.characters.filter(character => character.selected !== false).length;
+        summary.textContent = `分级已关闭 · 已勾选 ${selected} / ${state.characters.length}。可改名字、取消勾选后生成。`;
         return;
     }
     const counts = countTiers();

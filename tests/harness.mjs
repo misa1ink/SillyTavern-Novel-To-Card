@@ -34,8 +34,15 @@ async function check(name, fn) {
 
 // ---------------------------------------------------------------- 最小 DOM
 
-class FakeClassList {
-    constructor(owner) { this.owner = owner; this.set = new Set(); }
+function toKebab(text) {
+    return text.replace(/[A-Z]/g, ch => `-${ch.toLowerCase()}`);
+}
+
+function toCamel(text) {
+    return text.replace(/-([a-z])/g, (_match, ch) => ch.toUpperCase());
+}
+
+class FakeClassList {    constructor(owner) { this.owner = owner; this.set = new Set(); }
     add(...names) { for (const n of names) this.set.add(n); }
     remove(...names) { for (const n of names) this.set.delete(n); }
     contains(name) { return this.set.has(name); }
@@ -59,6 +66,19 @@ class FakeElement {
         this._classes = [];
         this._listeners = new Map();
         this.attributes = {};
+        // dataset 与 data-* 属性互通，跟浏览器行为一致（面板用 dataset.tab 区分标签页）
+        this.dataset = new Proxy({}, {
+            get: (_target, key) => this.attributes[`data-${toKebab(String(key))}`],
+            set: (_target, key, value) => {
+                this.attributes[`data-${toKebab(String(key))}`] = String(value);
+                return true;
+            },
+            has: (_target, key) => `data-${toKebab(String(key))}` in this.attributes,
+            ownKeys: () => Object.keys(this.attributes)
+                .filter(name => name.startsWith('data-'))
+                .map(name => toCamel(name.slice(5))),
+            getOwnPropertyDescriptor: () => ({ enumerable: true, configurable: true }),
+        });
         this.value = '';
         this.checked = false;
         this.disabled = false;
@@ -146,9 +166,18 @@ class FakeElement {
         const list = this._listeners.get(type) || [];
         this._listeners.set(type, list.filter(item => item !== handler));
     }
+    /**
+     * 触发事件并向上冒泡（与浏览器一致）。
+     * 面板的标签页切换用的是事件委托，不冒泡的话这类代码在测试里永远不会执行。
+     */
     dispatch(type, event = {}) {
-        for (const handler of [...(this._listeners.get(type) || [])]) {
-            handler({ target: this, preventDefault() {}, stopPropagation() {}, ...event });
+        let node = this;
+        const payload = { target: this, preventDefault() {}, stopPropagation() {}, ...event };
+        while (node) {
+            for (const handler of [...(node._listeners.get(type) || [])]) {
+                handler(payload);
+            }
+            node = node.parentNode;
         }
     }
     click() { this.dispatch('click', {}); }
@@ -419,6 +448,81 @@ try {
             'n2c-classify', 'n2c-api-client', 'n2c-api-url', 'n2c-api-test',
             'n2c-max-protagonists', 'n2c-max-supporting']) {
             if (!html.includes(`id="${id}"`)) throw new Error(`缺少控件 ${id}`);
+        }
+    });
+
+    check('面板分成四个标签页，每页都有对应面板', () => {
+        const panel = registry.get('n2c-panel');
+        const tabs = panel.querySelectorAll('.n2c-tab').map(tab => tab.dataset.tab);
+        const panes = panel.querySelectorAll('.n2c-pane').map(pane => pane.dataset.pane);
+        for (const expected of ['work', 'chars', 'settings', 'data']) {
+            if (!tabs.includes(expected)) throw new Error(`缺少标签页 ${expected}`);
+            if (!panes.includes(expected)) throw new Error(`缺少面板 ${expected}`);
+        }
+    });
+
+    check('初始只显示「转换」页', () => {
+        const panel = registry.get('n2c-panel');
+        const active = panel.querySelectorAll('.n2c-pane')
+            .filter(pane => pane.classList.contains('n2c-pane-active'))
+            .map(pane => pane.dataset.pane);
+        if (active.length !== 1 || active[0] !== 'work') {
+            throw new Error(`初始激活的面板不对：${JSON.stringify(active)}`);
+        }
+    });
+
+    check('点标签能切页，且同时只有一个面板可见', () => {
+        const panel = registry.get('n2c-panel');
+        const settingsTab = panel.querySelectorAll('.n2c-tab').find(tab => tab.dataset.tab === 'settings');
+        if (!settingsTab) throw new Error('找不到设置标签');
+        settingsTab.dispatch('click', { target: settingsTab });
+
+        const active = panel.querySelectorAll('.n2c-pane')
+            .filter(pane => pane.classList.contains('n2c-pane-active'))
+            .map(pane => pane.dataset.pane);
+        if (active.length !== 1 || active[0] !== 'settings') {
+            throw new Error(`切换后面板不对：${JSON.stringify(active)}`);
+        }
+        const activeTabs = panel.querySelectorAll('.n2c-tab')
+            .filter(tab => tab.classList.contains('n2c-tab-active'))
+            .map(tab => tab.dataset.tab);
+        if (activeTabs.length !== 1 || activeTabs[0] !== 'settings') {
+            throw new Error(`高亮的标签不对：${JSON.stringify(activeTabs)}`);
+        }
+
+        // 切回去
+        const workTab = panel.querySelectorAll('.n2c-tab').find(tab => tab.dataset.tab === 'work');
+        workTab.dispatch('click', { target: workTab });
+    });
+
+    check('独立 API 配置在设置页，且不再埋在高级设置抽屉里', () => {
+        const panel = registry.get('n2c-panel');
+        const settingsPane = panel.querySelectorAll('.n2c-pane').find(pane => pane.dataset.pane === 'settings');
+        if (!settingsPane) throw new Error('找不到设置页');
+
+        const apiConfig = registry.get('n2c-api-config');
+        if (!apiConfig) throw new Error('找不到独立 API 配置块');
+        if (!settingsPane.contains(apiConfig)) throw new Error('独立 API 不在设置页里');
+
+        // 控件嵌套层数：卡片 → 配置块 → 字段，不应再深
+        let depth = 0;
+        let node = apiConfig;
+        while (node && node !== settingsPane) {
+            node = node.parentNode;
+            depth++;
+            if (depth > 6) break;
+        }
+        if (depth > 6) throw new Error(`独立 API 嵌套过深（${depth} 层）`);
+    });
+
+    check('所有可交互控件都在 DOM 里且带 id（没有孤立的 id 引用）', () => {
+        const panel = registry.get('n2c-panel');
+        const needed = ['n2c-analyze', 'n2c-generate', 'n2c-classify', 'n2c-save-now',
+            'n2c-preview-split', 'n2c-api-test', 'n2c-autosave', 'n2c-clear-log'];
+        for (const id of needed) {
+            const element = registry.get(id);
+            if (!element) throw new Error(`控件 ${id} 不存在`);
+            if (!panel.contains(element)) throw new Error(`控件 ${id} 不在面板 DOM 树里`);
         }
     });
     check('加载后能在扩展设置里看到本模块的配置对象', () => {
