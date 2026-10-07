@@ -195,6 +195,108 @@ ${evidence}`;
     ];
 }
 
+// ---------------------------------------------------------------- 剧情拆解（可玩化）
+
+/**
+ * 把原著拆成有序剧情节点 + 玩家状态 + 可追踪变量。
+ * 这是「可游玩」的核心：节点决定剧情推进，变量决定状态可追踪。
+ */
+export function buildStageExtractionPrompt({
+    novelTitle,
+    playerName,
+    evidence,
+    targetNodes,
+    instruction,
+}) {
+    const extra = instruction ? `\n额外要求：${instruction}\n` : '';
+    const playerLine = playerName
+        ? `玩家将扮演：${playerName}`
+        : '玩家将扮演故事的主要视角人物（请你从原文判断并写明是谁）';
+
+    const user = `下面是小说的原文素材。请把它改编成一份**可交互游玩的剧情脚本**。
+
+${playerLine}${extra}
+你的任务分三部分：
+
+【一】把剧情拆成 ${targetNodes} 个左右**有序**的节点（stage）。
+- 每个节点是一个「玩家需要应对的局面」，不是章节摘要
+- 节点按原著时间顺序排列，节点间要有因果推进
+- 每个节点的 situation 要写清：此刻发生了什么、玩家身处何地、面临什么选择或压力
+- 每个节点的 objective 写清：这个节点里玩家大致要达成/解决什么（可以是"活下去""查明真相"这种）
+- 只写原文确实发生过的内容，不要编造后续剧情
+
+【二】给出**玩家角色的开局状态**。
+- 玩家扮演谁、此时的身份与处境、已知什么、不知道什么
+- 手里有什么关键物品、与哪些人是什么关系、当前的目标
+
+【三】提取**需要在游玩过程中追踪的状态变量**。
+- 比如好感度、伤势、持有物、已获得的情报、时间压力
+- 每个变量给出名称、类型、初始值。类型只用这三种：
+  number（数值，可增减）、text（文本状态）、bool（是/否）
+
+只输出 JSON 对象，不要解释，不要 Markdown 代码块：
+{
+  "player": {
+    "name": "玩家扮演的角色名",
+    "identity": "身份与处境，一段话",
+    "known": "开局时已知的信息",
+    "unknown": "开局时还不知道、需要探索的信息",
+    "items": ["开局持有的关键物品"],
+    "relationships": "与其他角色的初始关系",
+    "goal": "当前的主要目标"
+  },
+  "variables": [
+    {"name": "变量名", "type": "number", "initial": 0, "desc": "这个变量代表什么"},
+    {"name": "变量名", "type": "text", "initial": "初始状态", "desc": "说明"}
+  ],
+  "stages": [
+    {
+      "title": "节点标题（6-14 字）",
+      "location": "发生地点",
+      "chapterRef": "对应原著的章节或大致位置",
+      "situation": "这个节点开始时正在发生什么，玩家看到/听到什么。200-400字，写成可演的场面，不要写成摘要",
+      "objective": "玩家在这个节点里要应对什么",
+      "keyCharacters": ["本节点出场的原著角色"],
+      "stakes": "失败的后果是什么",
+      "exitHint": "出现什么情况就算这个节点过去了"
+    }
+  ]
+}
+
+小说原文素材：
+${evidence}`;
+
+    return [
+        { role: 'system', content: EXTRACT_SYSTEM_PROMPT },
+        { role: 'user', content: user },
+    ];
+}
+
+/** 剧情节点的开场白：把玩家直接放进第一个节点 */
+export function buildOpeningPrompt({ novelTitle, player, stage, style }) {
+    const styleLine = style ? `\n文风要求：${style}` : '';
+    const user = `你在为一部小说改编的互动剧情写开场。
+
+原著：《${novelTitle || '未命名'}》
+玩家扮演：${player?.name || '主角'}（${player?.identity || ''}）
+首个节点：${stage?.title || '开场'}
+地点：${stage?.location || ''}
+正在发生：${stage?.situation || ''}
+玩家的目标：${stage?.objective || ''}
+
+请写一段 300-500 字的开场白，要求：
+1. 用第二人称"你"称呼玩家，现在时叙述，让玩家立刻进入场面
+2. 从节点的 situation 写起，写出环境、正在发生的事、在场的人
+3. 结尾留一个明确的行动缺口（等人说话、等玩家决定、或一个突然的变化），不要替玩家做决定
+4. 不要写"你可以选择A/B/C"这类列表，不要写任何元信息、不要写标题
+5. 只输出开场白正文${styleLine}`;
+
+    return [
+        { role: 'system', content: '你是一位擅长互动叙事的中文小说作者。只输出正文，不加任何解释或标记。' },
+        { role: 'user', content: user },
+    ];
+}
+
 // ---------------------------------------------------------------- 解析
 
 /**

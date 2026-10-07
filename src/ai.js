@@ -10,6 +10,8 @@ import {
     buildProfilePrompt,
     buildWorldPrompt,
     buildClassifyPrompt,
+    buildStageExtractionPrompt,
+    buildOpeningPrompt,
     parseModelJson,
     asArray,
 } from './prompts.js';
@@ -751,6 +753,49 @@ export function normalizeTier(value) {
 
     // 认不出来就当主要配角，至少不会被误降级成精简档案
     return '主要配角';
+}
+
+/**
+ * 把原著拆成可游玩的剧情节点 + 玩家状态 + 追踪变量。
+ *
+ * 与角色提取不同：这里要的是**叙事骨架**而不是人设细节，
+ * 所以按顺序均匀抽段（覆盖全书走向），而不是挑角色相关片段。
+ */
+export async function extractStoryStages({
+    chunks,
+    novelTitle,
+    playerName,
+    callModel,
+    instruction,
+    signal,
+    sampleCount = 10,
+    charsPerSample = 3000,
+    targetNodes = 12,
+}) {
+    if (!chunks?.length) throw new Error('没有可用的文本分段');
+
+    // 均匀抽段：开头、中段、结尾都要有，否则剧情节点会全挤在开头
+    const picks = sampleChunks(chunks, Math.max(4, sampleCount));
+    const evidence = picks
+        .map(item => `【第 ${item.index + 1} 段节选】\n${item.text.slice(0, charsPerSample)}`)
+        .join('\n\n');
+
+    const messages = buildStageExtractionPrompt({
+        novelTitle,
+        playerName,
+        evidence,
+        targetNodes,
+        instruction,
+    });
+    const raw = await callModel(messages, { maxTokens: 8000, signal });
+    return parseModelJson(raw);
+}
+
+/** 生成剧情开场白 */
+export async function generateOpening({ novelTitle, player, stage, style, callModel, signal }) {
+    const messages = buildOpeningPrompt({ novelTitle, player, stage, style });
+    const raw = await callModel(messages, { maxTokens: 2000, signal });
+    return String(raw ?? '').trim();
 }
 
 /**

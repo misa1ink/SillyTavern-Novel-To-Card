@@ -354,34 +354,61 @@ sandbox.globalThis = sandbox;
 /** 记录扩展对酒馆 API 的实际用法，便于断言 */
 const usage = {
     settingsSaved: 0,
-    registeredTabs: [],
-    extensionSettingsTouched: [],
+    metadataSaved: 0,
+    extensionPromptCalls: [],
+    /** 扩展注册过的事件名 */
+    registeredEvents: [],
 };
 
 const extensionSettingsStub = {};
 
+/** 每个聊天共享的元数据，剧情进度存在这里 */
+const chatMetadataStub = {};
+
+/** 极简事件总线：剧情注入依赖 CHAT_COMPLETION_PROMPT_READY 等事件 */
+const eventHandlers = new Map();
+const eventSourceStub = {
+    on(event, handler) {
+        if (!eventHandlers.has(event)) eventHandlers.set(event, []);
+        eventHandlers.get(event).push(handler);
+        usage.registeredEvents.push(event);
+    },
+    off() {},
+    removeListener() {},
+    emit() {},
+};
+
+const eventTypesStub = {
+    CHAT_COMPLETION_PROMPT_READY: 'chat_completion_prompt_ready',
+    MESSAGE_RECEIVED: 'message_received',
+    CHAT_CHANGED: 'chat_changed',
+    CHARACTER_EDITED: 'character_edited',
+};
+
+/** 测试里触发某个酒馆事件 */
+function emitEvent(type, ...args) {
+    for (const handler of eventHandlers.get(type) || []) handler(...args);
+}
+
 const stubs = {
     'script.js': `
         export const saveSettingsDebounced = () => { globalThis.__usage.settingsSaved++; };
+        export const saveMetadataDebounced = () => { globalThis.__usage.metadataSaved++; };
         export const getCharacters = async () => {};
-        export const eventSource = { on() {}, emit() {} };
-        export const event_types = {};
+        export const chat_metadata = globalThis.__chatMetadata;
+        export const eventSource = globalThis.__eventSource;
+        export const event_types = globalThis.__eventTypes;
         export const extension_settings = globalThis.__extensionSettings;
         export const saveChatConditional = async () => {};
-        export const getContext = () => ({});
-        export const chat_metadata = {};
+        export const getContext = () => globalThis.__context;
         export const characters = [];
+        export const setExtensionPrompt = (...args) => { globalThis.__usage.extensionPromptCalls.push(args); };
     `,
     'extensions.js': `
         export const extension_settings = globalThis.__extensionSettings;
-        export const getContext = () => ({
-            generateRaw: async () => '{"name":"桩角色","summary":"桩"}',
-            getRequestHeaders: () => ({ 'X-CSRF-Token': 'stub' }),
-            saveWorldInfo: async () => {},
-            loadWorldInfo: async () => ({ entries: {} }),
-        });
+        export const getContext = () => globalThis.__context;
         export const renderExtensionTemplateAsync = async () => '';
-        export const saveMetadataDebounced = () => {};
+        export const saveMetadataDebounced = () => { globalThis.__usage.metadataSaved++; };
     `,
 };
 
@@ -391,7 +418,25 @@ const STUB_SPECIFIERS = new Set(['script.js', 'extensions.js', '../../../../scri
 let context;
 try {
     context = vm.createContext(sandbox);
-    Object.assign(sandbox, { __usage: usage, __extensionSettings: extensionSettingsStub });
+    // 假酒馆上下文：扩展通过 getContext() 拿事件系统、聊天记录与世界书接口
+    const hubContext = {
+        eventSource: eventSourceStub,
+        eventTypes: eventTypesStub,
+        chat: [],
+        generateRaw: async () => '{"name":"桩角色","summary":"桩"}',
+        getRequestHeaders: () => ({ 'X-CSRF-Token': 'stub' }),
+        saveWorldInfo: async () => {},
+        loadWorldInfo: async () => ({ entries: {} }),
+        updateMessageBlock() {},
+    };
+    Object.assign(sandbox, {
+        __usage: usage,
+        __extensionSettings: extensionSettingsStub,
+        __chatMetadata: chatMetadataStub,
+        __eventSource: eventSourceStub,
+        __eventTypes: eventTypesStub,
+        __context: hubContext,
+    });
     sandbox.jQuery = fn => { if (typeof fn === 'function') fn(); return { on() { return this; } }; };
     sandbox.$ = sandbox.jQuery;
 
@@ -451,11 +496,11 @@ try {
         }
     });
 
-    check('面板分成四个标签页，每页都有对应面板', () => {
+    check('面板分成五个标签页，每页都有对应面板', () => {
         const panel = registry.get('n2c-panel');
         const tabs = panel.querySelectorAll('.n2c-tab').map(tab => tab.dataset.tab);
         const panes = panel.querySelectorAll('.n2c-pane').map(pane => pane.dataset.pane);
-        for (const expected of ['work', 'chars', 'settings', 'data']) {
+        for (const expected of ['work', 'story', 'chars', 'settings', 'data']) {
             if (!tabs.includes(expected)) throw new Error(`缺少标签页 ${expected}`);
             if (!panes.includes(expected)) throw new Error(`缺少面板 ${expected}`);
         }
@@ -766,6 +811,114 @@ try {
         if (!persist.formatBytes(2048).includes('KB')) throw new Error('KB 档格式化不对');
         if (!persist.formatBytes(5 * 1024 * 1024).includes('MB')) throw new Error('MB 档格式化不对');
         if (typeof persist.formatTime(Date.now()) !== 'string') throw new Error('时间格式化不对');
+    });
+
+    // ---- 剧情注入集成：验证扩展真的把剧情塞进请求，并且能读回控制行 ----
+    // 纯逻辑（节点推进、控制行解析、变量变更）在 tests/story.mjs，跑得更快也更细
+    console.log('\n[10] 剧情注入集成');
+
+    const storyEngineCacheKey = path.join(root, 'src/story-engine.js');
+    const storyEngineModule = cache.get(storyEngineCacheKey);
+    if (!storyEngineModule) throw new Error('story-engine.js 没有被加载，检查 index.js 的导入');
+
+    const samplePlaybook = {
+        player: { name: '沈青梧', identity: '青云宗首席弟子', goal: '查明师父下落', items: ['半块玄铁令'] },
+        variables: [
+            { name: '好感度', type: 'number', initial: 0, desc: '与苏晚的关系' },
+            { name: '伤势', type: 'text', initial: '轻伤', desc: '身体状况' },
+        ],
+        stages: [
+            { index: 0, title: '宗门残夜', location: '青云宗', situation: '火光里你醒来。', keyCharacters: ['苏晚'], objective: '找到苏晚', exitHint: '确认苏晚安危' },
+            { index: 1, title: '后山密道', location: '后山', situation: '你摸到石壁的裂缝。', keyCharacters: [], objective: '进密道', exitHint: '进入密道' },
+        ],
+        warnings: [],
+    };
+
+    check('剧情页的控件都渲染出来了', () => {
+        const panel = registry.get('n2c-panel');
+        for (const id of ['n2c-story-build', 'n2c-story-start', 'n2c-story-stop', 'n2c-story-active',
+            'n2c-story-nodes', 'n2c-story-player', 'n2c-story-opening', 'n2c-story-progress']) {
+            const element = registry.get(id);
+            if (!element) throw new Error(`缺少控件 ${id}`);
+            if (!panel.contains(element)) throw new Error(`控件 ${id} 不在面板 DOM 树里`);
+        }
+    });
+
+    check('扩展注册了剧情所需的三个酒馆事件', () => {
+        for (const type of [eventTypesStub.CHAT_COMPLETION_PROMPT_READY,
+            eventTypesStub.MESSAGE_RECEIVED, eventTypesStub.CHAT_CHANGED]) {
+            if (!usage.registeredEvents.includes(type)) throw new Error(`没有注册事件 ${type}`);
+        }
+    });
+
+    check('剧情未开启时不注入任何内容', () => {
+        hubContext.chat.length = 0;
+        emitEvent(eventTypesStub.CHAT_COMPLETION_PROMPT_READY, { chat: hubContext.chat });
+        if (hubContext.chat.length !== 0) throw new Error('未开启剧情却注入了内容');
+    });
+
+    await check('开启后把当前剧情段注入 eventData.chat', async () => {
+        // 模拟真实路径：用户在界面上打开「注入剧情」开关，
+        // 处理器会把 storyActive 与 _storyActive 一起写进设置
+        const config = extensionSettingsStub['novel_to_card'];
+        config._storyPlaybook = samplePlaybook;
+        config._storyOpening = '开场白测试';
+
+        const toggle = registry.get('n2c-story-active');
+        if (!toggle) throw new Error('找不到注入开关');
+        toggle.checked = true;
+        toggle.dispatch('change');
+        await new Promise(resolve => setTimeout(resolve, 20));
+
+        if (config._storyActive !== true) throw new Error('开关状态没有落盘，刷新后会失效');
+
+        // 触发 CHAT_CHANGED 让扩展重新加载剧本与进度
+        emitEvent(eventTypesStub.CHAT_CHANGED);
+        await new Promise(resolve => setTimeout(resolve, 20));
+
+        hubContext.chat.length = 0;
+        emitEvent(eventTypesStub.CHAT_COMPLETION_PROMPT_READY, { chat: hubContext.chat });
+
+        if (hubContext.chat.length !== 1) throw new Error(`注入条数不对：${hubContext.chat.length}`);
+        const injected = hubContext.chat[0].content;
+        if (!injected.includes('宗门残夜')) throw new Error('注入内容缺少当前段');
+        if (!injected.includes('沈青梧')) throw new Error('注入内容缺少玩家身份');
+        if (hubContext.chat[0].is_system !== true) throw new Error('注入消息没有标记为 system');
+    });
+
+    await check('模型回复带控制行时：剔标记、改变量、自动推进', async () => {
+        hubContext.chat.length = 0;
+        hubContext.chat.push({ is_user: false, mes: '火光里你醒来。\n[状态] 好感度=+7；伤势=重伤\n[推进]' });
+
+        emitEvent(eventTypesStub.MESSAGE_RECEIVED, 0);
+        await new Promise(resolve => setTimeout(resolve, 30));
+
+        const message = hubContext.chat[0];
+        if (message.mes.includes('[推进]') || message.mes.includes('[状态]')) {
+            throw new Error(`控制行没有被剔除：${JSON.stringify(message.mes)}`);
+        }
+        if (!message.mes.includes('火光里你醒来')) throw new Error('正文被误删');
+
+        const saved = chatMetadataStub['novel_to_card_story'];
+        if (!saved) throw new Error('进度没有写进聊天元数据');
+        if (saved.variables['好感度'] !== 7) throw new Error(`数值变量没有累加：${saved.variables['好感度']}`);
+        if (saved.variables['伤势'] !== '重伤') throw new Error('文本变量没有更新');
+        if (saved.stageIndex !== 1) throw new Error(`没有自动推进：${saved.stageIndex}`);
+    });
+
+    await check('关闭注入后不再往请求里塞剧情', async () => {
+        const toggle = registry.get('n2c-story-active');
+        toggle.checked = false;
+        toggle.dispatch('change');
+        await new Promise(resolve => setTimeout(resolve, 20));
+
+        if (extensionSettingsStub['novel_to_card']._storyActive !== false) {
+            throw new Error('关闭状态没有落盘');
+        }
+
+        hubContext.chat.length = 0;
+        emitEvent(eventTypesStub.CHAT_COMPLETION_PROMPT_READY, { chat: hubContext.chat });
+        if (hubContext.chat.length !== 0) throw new Error('关闭后仍在注入');
     });
 
     console.log(`\n结果：${passed} 通过，${failed} 失败\n`);

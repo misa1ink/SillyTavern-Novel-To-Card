@@ -13,8 +13,13 @@
  */
 
 import { getContext, extension_settings } from '../../../extensions.js';
-// saveSettingsDebounced 由 script.js 导出，extensions.js 不导出它（导入错会在激活期直接抛 SyntaxError）
-import { saveSettingsDebounced, getCharacters } from '../../../../script.js';
+// 这些都由 script.js 导出（extensions.js 不导出它们，导入错会在激活期直接抛 SyntaxError）
+import {
+    saveSettingsDebounced,
+    getCharacters,
+    chat_metadata,
+    saveMetadataDebounced,
+} from '../../../../script.js';
 
 import {
     splitNovel,
@@ -29,6 +34,8 @@ import {
     classifyCharacters,
     isBriefTier,
     canonicalName,
+    extractStoryStages,
+    generateOpening,
 } from './src/ai.js';
 
 import {
@@ -73,6 +80,19 @@ import {
     formatBytes,
     formatTime,
 } from './src/persist.js';
+
+import {
+    normalizePlaybook,
+    createRuntimeState,
+    advanceStage,
+    currentStage,
+    formatVariables,
+    buildStoryPrompt,
+    parseControlLines,
+    applyVariableChanges,
+    buildStoryWorldInfo,
+    summarizeProgress,
+} from './src/story-engine.js';
 
 const MODULE_NAME = 'novel_to_card';
 
@@ -124,6 +144,14 @@ const DEFAULT_SETTINGS = Object.freeze({
     winH: 620,
     // 中途保存
     autoSave: true,
+    // 剧情推进器
+    storyPlayerName: '',
+    storyNodeCount: 12,
+    storyStyle: '',
+    storyActive: false,
+    storyAutoAdvance: true,
+    storyAutoReport: true,
+    storyInjectDepth: 4,
 });
 
 const state = {
@@ -154,6 +182,11 @@ const state = {
     activeTab: 'work',
     // 独立 API 拉取到的模型列表（只存内存，避免把长列表塞进设置）
     modelList: [],
+    // 剧情推进器
+    playbook: null,
+    runtime: null,
+    storyActive: false,
+    storyOpening: '',
 };
 
 // ================================================================
@@ -240,6 +273,7 @@ function setRunning(running) {
 /** 标签页定义：常用流程放第一页，参数收进设置页，避免一屏堆二十多个控件 */
 const PANEL_TABS = [
     { id: 'work', label: '转换', icon: 'fa-wand-magic-sparkles', title: '从小说正文到角色卡的主流程' },
+    { id: 'story', label: '剧情', icon: 'fa-dice-d20', title: '把剧情拆成可游玩的分段脚本并推进' },
     { id: 'chars', label: '角色', icon: 'fa-users', title: '识别出的候选角色与分级结果' },
     { id: 'settings', label: '设置', icon: 'fa-sliders', title: '模型、分卷、卡片与提示词参数' },
     { id: 'data', label: '存档与日志', icon: 'fa-box-archive', title: '进度存档与运行日志' },
@@ -280,6 +314,7 @@ function renderPanelHtml() {
 
       <div class="n2c-tabpanes">
 ${renderTabWork(s)}
+${renderTabStory(s)}
 ${renderTabChars(s)}
 ${renderTabSettings(s)}
 ${renderTabData(s)}
@@ -343,6 +378,59 @@ function renderTabWork(s) {
   <div class="n2c-card">
     <div class="n2c-card-head"><i class="fa-solid fa-id-card"></i> 生成结果 <span class="n2c-count" id="n2c-result-count"></span></div>
     <div id="n2c-results" class="n2c-results"><div class="n2c-hint">尚未生成任何角色卡。</div></div>
+  </div>
+</div>`;
+}
+
+/** 剧情页：把剧情拆成可游玩的分段脚本，并在这里推进 */
+function renderTabStory(s) {
+    return `
+<div class="n2c-pane" data-pane="story">
+
+  <div class="n2c-card">
+    <div class="n2c-card-head"><i class="fa-solid fa-dice-d20"></i> 生成剧情脚本</div>
+    <div class="n2c-grid">
+      <label class="n2c-field"><span>玩家扮演谁（留空由模型判断）</span>
+        <input type="text" id="n2c-story-player" class="text_pole" placeholder="如：沈青梧" value="${escapeHtml(s.storyPlayerName)}"></label>
+      <label class="n2c-field"><span>切成几段</span>
+        <input type="number" id="n2c-story-nodes" class="text_pole" min="3" max="40" step="1" value="${s.storyNodeCount}"></label>
+    </div>
+    <div class="n2c-field n2c-field-wide"><span>文风要求（可选，写给开场白）</span>
+      <input type="text" id="n2c-story-style" class="text_pole" placeholder="如：冷硬写实，短句，少形容词" value="${escapeHtml(s.storyStyle)}"></div>
+    <div class="n2c-row">
+      <div class="menu_button n2c-primary" id="n2c-story-build"><i class="fa-solid fa-book-open-reader"></i> 生成剧情脚本</div>
+      <div class="menu_button n2c-small" id="n2c-story-worldbook"><i class="fa-solid fa-book-atlas"></i> 导出为世界书</div>
+      <div class="menu_button n2c-small" id="n2c-story-card"><i class="fa-solid fa-id-card"></i> 生成玩家角色卡</div>
+    </div>
+    <div class="n2c-hint">脚本按当前页/卷的文本生成。源文本在「转换」页载入；分卷后生成的就是当前卷的剧情。</div>
+  </div>
+
+  <div class="n2c-card">
+    <div class="n2c-card-head">
+      <i class="fa-solid fa-gamepad"></i> 游玩控制
+      <label class="checkbox_label n2c-head-check" title="开启后每回合自动把当前剧情段注入对话">
+        <input type="checkbox" id="n2c-story-active" ${s.storyActive ? 'checked' : ''}><span>注入剧情</span>
+      </label>
+    </div>
+    <div class="n2c-row">
+      <div class="menu_button n2c-primary n2c-small" id="n2c-story-start"><i class="fa-solid fa-play"></i> 开始游玩</div>
+      <div class="menu_button n2c-small" id="n2c-story-stop" style="display:none"><i class="fa-solid fa-stop"></i> 停止注入</div>
+    </div>
+    <div id="n2c-story-progress" class="n2c-story-progress"></div>
+    <div class="n2c-checks">
+      <label class="checkbox_label"><input type="checkbox" id="n2c-story-auto-advance" ${s.storyAutoAdvance ? 'checked' : ''}><span>模型说演完就自动推进</span></label>
+      <label class="checkbox_label"><input type="checkbox" id="n2c-story-auto-report" ${s.storyAutoReport !== false ? 'checked' : ''}><span>自动读回状态变化</span></label>
+    </div>
+    <div class="n2c-grid">
+      <label class="n2c-field"><span>注入深度（越小越靠后）</span>
+        <input type="number" id="n2c-story-depth" class="text_pole" min="0" max="30" step="1" value="${s.storyInjectDepth}"></label>
+    </div>
+    <div class="n2c-hint">注入只在本地生效：不改角色卡、不写聊天记录，关掉开关就恢复原样。进度按聊天分别保存。</div>
+  </div>
+
+  <div class="n2c-card">
+    <div class="n2c-card-head"><i class="fa-solid fa-scroll"></i> 开场白</div>
+    <div id="n2c-story-opening" class="n2c-story-opening"></div>
   </div>
 </div>`;
 }
@@ -575,8 +663,11 @@ function mountPanel() {
     initTabs();
     mountTopbarDrawer();
     applyEnabledState();
+    bindStoryRuntime();
     renderCharacterList();
     updateTextInfo();
+    renderStoryProgress();
+    renderStoryOpening();
     renderSaveList().catch(() => {});
     maybeOfferRestore();
 
@@ -1105,6 +1196,44 @@ function bindPanelEvents() {
         putSettings();
     });
 
+    // ---- 剧情推进器
+    bindNumber('n2c-story-nodes', 'storyNodeCount', { min: 3, max: 40 });
+    bindNumber('n2c-story-depth', 'storyInjectDepth', { min: 0, max: 30 });
+
+    const bindStoryText = (id, key) => {
+        $id(id)?.addEventListener('input', event => {
+            getSettings()[key] = event.target.value;
+            if (state._storyTimer) clearTimeout(state._storyTimer);
+            state._storyTimer = setTimeout(putSettings, 500);
+        });
+    };
+    bindStoryText('n2c-story-player', 'storyPlayerName');
+    bindStoryText('n2c-story-style', 'storyStyle');
+
+    $id('n2c-story-build')?.addEventListener('click', () => runStoryBuild());
+    $id('n2c-story-worldbook')?.addEventListener('click', () => downloadStoryWorldBook());
+    $id('n2c-story-card')?.addEventListener('click', () => createPlayerCard());
+    $id('n2c-story-start')?.addEventListener('click', () => startStory());
+    $id('n2c-story-stop')?.addEventListener('click', () => stopStory());
+
+    // 「注入剧情」开关直接对应运行时开关
+    $id('n2c-story-active')?.addEventListener('change', event => {
+        getSettings().storyActive = event.target.checked;
+        putSettings();
+        if (event.target.checked) startStory();
+        else stopStory();
+    });
+
+    for (const [id, key] of [
+        ['n2c-story-auto-advance', 'storyAutoAdvance'],
+        ['n2c-story-auto-report', 'storyAutoReport'],
+    ]) {
+        $id(id)?.addEventListener('change', event => {
+            getSettings()[key] = event.target.checked;
+            putSettings();
+        });
+    }
+
     syncApiConfigVisibility();
 
     // ---- 分卷相关
@@ -1515,6 +1644,11 @@ function snapshotState() {
         })),
         entries: state.entries,
         logLines: state.logLines.slice(-120),
+        // 剧情推进器：剧本与当前进度一起存，恢复后能接着演
+        playbook: state.playbook,
+        storyRuntime: state.runtime,
+        storyActive: state.storyActive,
+        storyOpening: state.storyOpening,
         savedAt: Date.now(),
     };
 }
@@ -1537,6 +1671,17 @@ function applySnapshot(snapshot) {
     clearChunkCache();
     state._chunkChars = snapshot.chunkChars || null;
 
+    // 剧情推进器（存档里带了就一起恢复）
+    if (snapshot.playbook?.stages?.length) {
+        state.playbook = snapshot.playbook;
+        state.runtime = snapshot.storyRuntime || createRuntimeState(snapshot.playbook);
+        state.storyActive = snapshot.storyActive === true;
+        state.storyOpening = snapshot.storyOpening || '';
+        persistStoryToSettings();
+        const checkbox = $id('n2c-story-active');
+        if (checkbox) checkbox.checked = state.storyActive;
+    }
+
     const textarea = $id('n2c-text');
     if (textarea) textarea.value = state.rawText.length > 200_000 ? state.rawText.slice(0, 200_000) : state.rawText;
     const titleInput = $id('n2c-title');
@@ -1545,6 +1690,8 @@ function applySnapshot(snapshot) {
     renderCharacterList();
     renderResults();
     renderVolumeList();
+    renderStoryProgress();
+    renderStoryOpening();
     updateTextInfo();
 
     const box = $id('n2c-log');
@@ -1682,6 +1829,587 @@ async function maybeOfferRestore() {
         updateSaveInfo(`上次存档：${latest.name} · ${formatTime(latest.savedAt)}`);
     } catch {
         // 读不到就安静跳过，别打扰用户
+    }
+}
+
+// ================================================================
+// 剧情推进器运行时
+// ================================================================
+
+/** 每个聊天自己的进度存在 chat_metadata 里，换聊天不会串进度 */
+const CHAT_META_KEY = 'novel_to_card_story';
+
+/** setExtensionPrompt 的注入槽名（事件路径用不到它，作为兜底） */
+const STORY_SLOT = 'novel_to_card_story';
+
+/**
+ * setExtensionPrompt 用动态 import 拿，不做静态导入。
+ * 理由：它跨酒馆版本可用性不稳（参照 novel-injector 的写法），
+ * 静态导入一旦失败会直接让扩展加载不了，动态拿最多是降级。
+ */
+let setExtensionPromptFn = null;
+async function ensureExtensionPromptFn() {
+    if (typeof setExtensionPromptFn === 'function') return setExtensionPromptFn;
+    try {
+        const module = await import('/script.js');
+        setExtensionPromptFn = module.setExtensionPrompt || null;
+    } catch {
+        setExtensionPromptFn = null;
+    }
+    return setExtensionPromptFn;
+}
+
+/**
+ * 剧本本身不放进默认设置（体积可能很大），单独挂在 extension_settings 下。
+ * 只保留必要的字段，避免把一堆运行时临时值也序列化进去。
+ */
+function persistStoryToSettings() {
+    const s = getSettings();
+    s._storyPlaybook = state.playbook || null;
+    s._storyOpening = state.storyOpening || '';
+    s._storyActive = state.storyActive === true;
+    putSettings();
+}
+
+/** 启动时把剧本恢复回来，并按当前聊天重建进度 */
+function restoreStoryFromSettings() {
+    const s = getSettings();
+    if (!s._storyPlaybook?.stages?.length) return;
+    state.playbook = s._storyPlaybook;
+    state.storyOpening = s._storyOpening || '';
+    // 运行时的开关键以设置里的为准：漏同步会导致"开关是开着的，但注入不生效"
+    state.storyActive = s._storyActive === true;
+    loadRuntimeFromChat();
+
+    const checkbox = $id('n2c-story-active');
+    if (checkbox) checkbox.checked = state.storyActive;
+    updateStoryButtonState();
+
+    log(`已恢复剧情脚本：${state.playbook.stages.length} 段，玩家扮演「${state.playbook.player?.name || '主角'}」`);
+}
+/**
+ * 绑定剧情推进的运行时钩子。
+ *
+ * - CHAT_COMPLETION_PROMPT_READY：把当前剧情段注入本次请求（首选路径，
+ *   直接改 eventData.chat，与上游/其他扩展的行为一致）
+ * - MESSAGE_RECEIVED：读回模型在回复尾部写的 [推进] / [状态] 控制行
+ * - CHAT_CHANGED：换聊天时重新加载该聊天的进度
+ */
+function bindStoryRuntime() {
+    const context = safeContext();
+    const events = context?.eventSource;
+    const types = context?.eventTypes;
+    if (!events?.on || !types) {
+        log('拿不到酒馆事件系统，剧情注入将不可用', 'warn');
+        return;
+    }
+
+    ensureExtensionPromptFn();
+
+    if (types.CHAT_COMPLETION_PROMPT_READY) {
+        events.on(types.CHAT_COMPLETION_PROMPT_READY, eventData => {
+            // dryRun 是酒馆自己的预演请求，不该被我们注入
+            if (eventData?.dryRun) return;
+            if (!isPluginEnabled()) return;
+            try {
+                pushStoryInjection(eventData);
+            } catch (error) {
+                console.warn('[小说转角色卡] 剧情注入失败：', error);
+            }
+        });
+    }
+
+    if (types.MESSAGE_RECEIVED) {
+        events.on(types.MESSAGE_RECEIVED, messageId => {
+            if (!isPluginEnabled()) return;
+            try {
+                handleMessageControlLines(messageId);
+            } catch (error) {
+                console.warn('[小说转角色卡] 处理控制行失败：', error);
+            }
+        });
+    }
+
+    if (types.CHAT_CHANGED) {
+        events.on(types.CHAT_CHANGED, () => {
+            // 不能因为当前没剧本就直接返回：扩展可能比酒馆数据先初始化，
+            // 那时剧本还没从设置里恢复。设置里有就先恢复，再重建本聊天的进度。
+            if (!state.playbook?.stages?.length && getSettings()._storyPlaybook?.stages?.length) {
+                restoreStoryFromSettings();
+            }
+            if (!state.playbook?.stages?.length) return;
+
+            loadRuntimeFromChat();
+            renderStoryProgress();
+            renderStoryOpening();
+            log(`已载入本聊天的剧情进度：第 ${(state.runtime?.stageIndex ?? 0) + 1} 段`);
+        });
+    }
+
+    restoreStoryFromSettings();
+}
+
+function getChatMetadata() {
+    try {
+        return chat_metadata || null;
+    } catch {
+        return null;
+    }
+}
+
+function loadRuntimeFromChat() {
+    const meta = getChatMetadata();
+    const saved = meta?.[CHAT_META_KEY];
+    if (!saved || !Number.isFinite(saved.stageIndex)) {
+        state.runtime = state.playbook ? createRuntimeState(state.playbook) : null;
+        return;
+    }
+    state.runtime = {
+        stageIndex: saved.stageIndex,
+        variables: saved.variables || {},
+        history: Array.isArray(saved.history) ? saved.history : [],
+        startedAt: saved.startedAt || Date.now(),
+    };
+}
+
+function saveRuntimeToChat() {
+    const meta = getChatMetadata();
+    if (!meta || !state.runtime) return;
+    meta[CHAT_META_KEY] = {
+        stageIndex: state.runtime.stageIndex,
+        variables: state.runtime.variables,
+        history: state.runtime.history,
+        startedAt: state.runtime.startedAt,
+    };
+    // 交给酒馆自己防抖落盘，避免每次生成都写一遍
+    try {
+        saveMetadataDebounced?.();
+    } catch {
+        // 拿不到就下次再说
+    }
+}
+
+/** 当前是否处于"游玩中"：脚本已生成且玩家开启了注入 */
+function isStoryPlaying() {
+    return !!(state.storyActive && state.playbook?.stages?.length && state.runtime);
+}
+
+/** 组装并写入本回合的注入内容 */
+function pushStoryInjection(eventData) {
+    if (!isStoryPlaying()) {
+        clearStoryInjection(eventData);
+        return;
+    }
+    const content = buildStoryPrompt({
+        playbook: state.playbook,
+        runtime: state.runtime,
+        autoReport: getSettings().storyAutoReport !== false,
+    });
+    if (!content.trim()) return;
+    injectIntoPrompt(eventData, STORY_SLOT, content);
+}
+
+function clearStoryInjection(eventData) {
+    if (eventData?.chat && Array.isArray(eventData.chat)) return;
+    try {
+        setExtensionPromptFn?.(STORY_SLOT, '', 1, 0, true, 0);
+    } catch {
+        // 忽略
+    }
+}
+
+/** 事件路径优先直接改 eventData.chat；拿不到就退回 setExtensionPrompt */
+function injectIntoPrompt(eventData, slotKey, content) {
+    const depth = Math.max(0, Number(getSettings().storyInjectDepth) || 4);
+    if (eventData?.chat && Array.isArray(eventData.chat)) {
+        const message = { role: 'system', content, is_system: true };
+        const index = Math.max(0, eventData.chat.length - depth);
+        eventData.chat.splice(index, 0, message);
+        return;
+    }
+    try {
+        setExtensionPromptFn?.(slotKey, content, 1, depth, true, 0);
+    } catch (error) {
+        log(`剧情注入失败：${error.message}`, 'warn');
+    }
+}
+
+/** 截获模型回复里的 [推进] / [状态] 控制行，应用后从展示内容里剔除 */
+function handleMessageControlLines(messageId) {
+    if (!isStoryPlaying()) return;
+    if (!getSettings().storyAutoAdvance && !getSettings().storyAutoReport) return;
+
+    const context = safeContext();
+    const chat = context?.chat;
+    if (!Array.isArray(chat)) return;
+    const message = chat[messageId];
+    if (!message || message.is_user || message.is_system) return;
+
+    const parsed = parseControlLines(message.mes);
+    if (!parsed.advance && !parsed.changes.length) return;
+
+    // 先把控制行从展示文本里去掉，避免它们出现在聊天里
+    if (parsed.cleaned !== String(message.mes ?? '').trim()) {
+        message.mes = parsed.cleaned;
+        try {
+            context.updateMessageBlock?.(messageId, message);
+        } catch {
+            // 更新气泡失败不影响状态推进
+        }
+    }
+
+    if (parsed.changes.length && getSettings().storyAutoReport) {
+        const { runtime, applied, skipped } = applyVariableChanges(state.runtime, state.playbook, parsed.changes);
+        state.runtime = runtime;
+        for (const item of applied) {
+            log(`状态变化：${item.name} ${item.before} → ${item.after}`);
+        }
+        if (skipped.length) log(`这些变量没在剧本里定义，已忽略：${skipped.join('、')}`, 'warn');
+    }
+
+    if (parsed.advance && getSettings().storyAutoAdvance) {
+        advanceToStage(state.runtime.stageIndex + 1, '剧情自然推进');
+    }
+
+    saveRuntimeToChat();
+    renderStoryProgress();
+}
+
+function safeContext() {
+    try {
+        return getContext();
+    } catch {
+        return null;
+    }
+}
+
+/** 推进/回退到指定节点 */
+function advanceToStage(index, note) {
+    if (!state.playbook?.stages?.length) return;
+    const total = state.playbook.stages.length;
+    const clamped = Math.max(0, Math.min(Math.floor(index), total - 1));
+    if (clamped === state.runtime.stageIndex) return;
+
+    state.runtime = advanceStage(state.runtime, state.playbook, { toIndex: clamped, note });
+    saveRuntimeToChat();
+    renderStoryProgress();
+
+    const stage = currentStage(state.playbook, state.runtime);
+    const verb = clamped > 0 ? '推进到' : '回到';
+    log(`${verb}第 ${clamped + 1}/${total} 段「${stage.title}」`);
+    toast('success', `${verb}第 ${clamped + 1} 段：${stage.title}`);
+}
+
+async function startStory() {
+    if (!requireEnabled()) return;
+
+    // 刷新页面后 state 是空的，但设置里可能存着剧本——先恢复再启动，
+    // 否则用户点了「开始游玩」会毫无反应
+    if (!state.playbook?.stages?.length && getSettings()._storyPlaybook?.stages?.length) {
+        restoreStoryFromSettings();
+    }
+    if (!state.playbook?.stages?.length) {
+        toast('warn', '请先在「剧情」页生成剧情脚本');
+        return;
+    }
+    if (!state.runtime) state.runtime = createRuntimeState(state.playbook);
+
+    state.storyActive = true;
+    const checkbox = $id('n2c-story-active');
+    if (checkbox) checkbox.checked = true;
+    // 状态必须落盘：否则刷新页面后 restoreStoryFromSettings 读到的是旧值，
+    // 开关看着还是开着的，注入却已经不生效了
+    persistStoryToSettings();
+    saveRuntimeToChat();
+    renderStoryProgress();
+    log(`已开启剧情注入：当前第 ${state.runtime.stageIndex + 1} 段「${currentStage(state.playbook, state.runtime)?.title}」`);
+    toast('success', '剧情注入已开启，现在开始聊天就会按节点推进');
+
+    updateStoryButtonState();
+}
+
+function stopStory() {
+    state.storyActive = false;
+    const checkbox = $id('n2c-story-active');
+    if (checkbox) checkbox.checked = false;
+    persistStoryToSettings();
+    clearStoryInjection(null);
+    renderStoryProgress();
+    updateStoryButtonState();
+    log('已关闭剧情注入');
+}
+
+function updateStoryButtonState() {
+    const start = $id('n2c-story-start');
+    const stop = $id('n2c-story-stop');
+    if (start) start.style.display = isStoryPlaying() ? 'none' : '';
+    if (stop) stop.style.display = isStoryPlaying() ? '' : 'none';
+}
+
+function renderStoryProgress() {
+    const host = $id('n2c-story-progress');
+    if (!host) return;
+
+    if (!state.playbook?.stages?.length) {
+        host.innerHTML = '<div class="n2c-hint">还没有剧情脚本。到本页上方生成，或在「转换」页先分卷再生成。</div>';
+        updateStoryButtonState();
+        return;
+    }
+
+    const progress = summarizeProgress(state.playbook, state.runtime);
+    const stage = currentStage(state.playbook, state.runtime);
+    const variables = formatVariables(state.playbook, state.runtime);
+    const player = state.playbook.player || {};
+
+    const variableRows = (state.playbook.variables || []).map(variable => {
+        const value = state.runtime?.variables?.[variable.name];
+        const shown = typeof value === 'boolean' ? (value ? '是' : '否') : String(value ?? '');
+        return `<div class="n2c-var-row" title="${escapeHtml(variable.desc || '')}">
+          <span class="n2c-var-name">${escapeHtml(variable.name)}</span>
+          <input type="text" class="text_pole n2c-var-value" data-var="${escapeHtml(variable.name)}" value="${escapeHtml(shown)}">
+        </div>`;
+    }).join('');
+
+    host.innerHTML = `
+<div class="n2c-story-head">
+  <div class="n2c-story-title">第 ${progress.current} / ${progress.total} 段 · ${escapeHtml(progress.title)}</div>
+  <div class="n2c-story-meta">${escapeHtml(progress.location || '')}${player.name ? ` · 你扮演 ${escapeHtml(player.name)}` : ''}</div>
+</div>
+<div class="n2c-progress"><div class="n2c-progress-bar" style="width:${progress.percent}%"></div></div>
+<div class="n2c-row n2c-row-actions">
+  <div class="menu_button n2c-small" id="n2c-story-prev"><i class="fa-solid fa-backward-step"></i> 上一段</div>
+  <div class="menu_button n2c-small n2c-primary" id="n2c-story-next"><i class="fa-solid fa-forward-step"></i> 下一段</div>
+  <div class="menu_button n2c-small" id="n2c-story-insert"><i class="fa-solid fa-quote-left"></i> 把本段发到输入框</div>
+</div>
+${variableRows ? `<div class="n2c-label n2c-label-gap">追踪变量</div><div class="n2c-var-list">${variableRows}</div>` : ''}
+<div class="n2c-hint">变量可直接改；改动会立刻用于下一次注入。</div>`;
+
+    $id('n2c-story-prev')?.addEventListener('click', () => advanceToStage(state.runtime.stageIndex - 1, '手动回退'));
+    $id('n2c-story-next')?.addEventListener('click', () => advanceToStage(state.runtime.stageIndex + 1, '手动推进'));
+    $id('n2c-story-insert')?.addEventListener('click', () => insertStageToInput(stage));
+
+    host.querySelectorAll('.n2c-var-value').forEach(input => {
+        input.addEventListener('input', event => {
+            const name = event.target.dataset.var;
+            const definition = (state.playbook.variables || []).find(item => item.name === name);
+            if (!definition || !state.runtime) return;
+            let value = event.target.value;
+            if (definition.type === 'number') {
+                const number = Number(value);
+                value = Number.isFinite(number) ? number : 0;
+            } else if (definition.type === 'bool') {
+                value = /^(是|true|1|yes|有)$/i.test(String(value));
+            }
+            state.runtime.variables[name] = value;
+            saveRuntimeToChat();
+        });
+    });
+
+    updateStoryButtonState();
+}
+
+/** 把当前节点写进聊天输入框，方便手动补一段环境描写或直接演 */
+function insertStageToInput(stage) {
+    if (!stage) return;
+    const textarea = document.querySelector('#send_textarea');
+    if (!textarea) {
+        toast('warn', '找不到输入框，可手动复制');
+        return;
+    }
+    const text = `（本段地点：${stage.location || '未知'}。${stage.situation.slice(0, 200)}）`;
+    textarea.value = textarea.value ? `${textarea.value}\n${text}` : text;
+    textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    toast('success', '已把本段背景写进输入框');
+}
+
+/** 生成剧情脚本 */
+async function runStoryBuild() {
+    if (state.running) return;
+    if (!requireEnabled()) return;
+
+    const settings = getSettings();
+    const text = activeText().trim();
+    if (!text) {
+        toast('warn', '请先在「转换」页载入小说文本');
+        return;
+    }
+
+    const volumeLabel = activeVolumeLabel();
+    const abort = new AbortController();
+    state.abort = abort;
+    setRunning(true);
+
+    try {
+        await ensureChunks(text);
+        const callModel = buildModelClient();
+
+        setProgress(10, '拆解剧情节点…');
+        log(`开始拆解剧情${volumeLabel ? `（${volumeLabel}）` : ''}…`);
+        const raw = await extractStoryStages({
+            chunks: state.chunks,
+            novelTitle: state.novelTitle,
+            playerName: settings.storyPlayerName,
+            callModel,
+            instruction: settings.extraInstruction,
+            signal: abort.signal,
+            targetNodes: Number(settings.storyNodeCount) || 12,
+        });
+
+        const playbook = normalizePlaybook(raw);
+        for (const warning of playbook.warnings) log(warning, 'warn');
+        if (!playbook.stages.length) {
+            throw new Error('模型没有返回可用的剧情节点');
+        }
+
+        state.playbook = playbook;
+        state.runtime = createRuntimeState(playbook);
+        state.storyActive = false;
+
+        setProgress(75, '写开场白…');
+        try {
+            const opening = await generateOpening({
+                novelTitle: state.novelTitle,
+                player: playbook.player,
+                stage: playbook.stages[0],
+                style: settings.storyStyle,
+                callModel,
+                signal: abort.signal,
+            });
+            state.storyOpening = opening;
+        } catch (error) {
+            log(`开场白生成失败（不影响游玩）：${error.message}`, 'warn');
+            state.storyOpening = '';
+        }
+
+        log(`剧情脚本完成：${playbook.stages.length} 段，玩家扮演「${playbook.player.name}」，${playbook.variables.length} 个追踪变量`);
+        for (const stage of playbook.stages) {
+            log(`  第 ${stage.index + 1} 段：${stage.title}${stage.location ? `（${stage.location}）` : ''}`);
+        }
+
+        saveRuntimeToChat();
+        persistStoryToSettings();
+        renderStoryProgress();
+        renderStoryOpening();
+        setProgress(100, '剧情脚本就绪');
+        toast('success', `剧情脚本已生成：${playbook.stages.length} 段`);
+        await autoSaveCheckpoint('剧情脚本生成完成');
+    } catch (error) {
+        log(`剧情拆解失败：${error.message}`, 'error');
+        toast('error', `剧情拆解失败：${error.message}`);
+        setProgress(0, '剧情拆解失败');
+    } finally {
+        setRunning(false);
+        state.abort = null;
+    }
+}
+
+function renderStoryOpening() {
+    const host = $id('n2c-story-opening');
+    if (!host) return;
+    if (!state.storyOpening) {
+        host.innerHTML = '<div class="n2c-hint">还没有开场白。生成剧情脚本时会一起产出。</div>';
+        return;
+    }
+    host.innerHTML = `
+      <div class="n2c-opening-text">${escapeHtml(state.storyOpening)}</div>
+      <div class="n2c-row"><div class="menu_button n2c-small" id="n2c-copy-opening">
+        <i class="fa-solid fa-copy"></i> 复制开场白</div></div>`;
+    $id('n2c-copy-opening')?.addEventListener('click', () => {
+        navigator.clipboard?.writeText(state.storyOpening)
+            .then(() => toast('success', '开场白已复制'))
+            .catch(() => toast('warn', '复制失败，请手动选中'));
+    });
+}
+
+/** 把剧本导出成世界书，方便在没有扩展的场合也能用 */
+function downloadStoryWorldBook() {
+    if (!state.playbook?.stages?.length) {
+        toast('warn', '还没有剧情脚本');
+        return;
+    }
+    const data = buildStoryWorldInfo({
+        playbook: state.playbook,
+        novelTitle: state.novelTitle,
+        buildWorldInfoData,
+    });
+    const name = `${safeFileName(state.novelTitle || '小说')}·剧情脚本`;
+    downloadBlob(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }), `${name}.json`);
+    log(`已导出剧情世界书：${name}.json（${state.playbook.stages.length} 段）`);
+}
+
+/** 用剧本生成一张"玩家角色卡"，导入后即可直接开玩 */
+async function createPlayerCard() {
+    if (!state.playbook?.stages?.length) {
+        toast('warn', '还没有剧情脚本');
+        return;
+    }
+    if (!requireEnabled()) return;
+
+    const playbook = state.playbook;
+    const player = playbook.player || {};
+    const stage = playbook.stages[0];
+    const name = player.name || '主角';
+    const settings = getSettings();
+
+    const profile = {
+        name,
+        role: player.identity || '剧情主角',
+        summary: `${state.novelTitle || '小说'} 的互动剧情主角。${player.goal || ''}`,
+        personality: player.relationships || '',
+        scenario: stage?.situation || '',
+        world_context: `由《${state.novelTitle || '未命名'}》拆出的 ${playbook.stages.length} 段互动剧情。`,
+        first_mes: state.storyOpening || stage?.situation || '',
+        example_dialogue: [],
+    };
+
+    const meta = {
+        creator: settings.creatorName || '小说转角色卡',
+        version: settings.cardVersionTag || '1.0',
+        source: state.novelTitle,
+        sources: [state.novelTitle].filter(Boolean),
+        tags: ['剧情脚本', '可游玩'],
+    };
+
+    try {
+        const cardV2 = buildCardV2(profile, meta);
+        const cardV3 = buildCardV3(profile, meta);
+
+        // 把剧情节点作为 character_book 内嵌，导入即自带世界书
+        const storyBook = buildStoryWorldInfo({
+            playbook,
+            novelTitle: state.novelTitle,
+            buildWorldInfoData,
+        });
+        const bookEntries = Object.values(storyBook.entries || {}).map(entry => ({
+            comment: entry.comment,
+            keys: entry.key,
+            content: entry.content,
+            category: entry.group || '剧情节点',
+            constant: entry.constant,
+        }));
+        const bookName = `${name}·${state.novelTitle || '小说'}剧情`;
+        cardV2.data.character_book = buildCharacterBook(bookEntries, { name: bookName });
+        cardV3.data.character_book = buildCharacterBook(bookEntries, { name: bookName });
+
+        const basePng = await generatePlaceholderPng(name, { size: Number(settings.avatarMaxSize) || 512 });
+        const pngBytes = embedCardIntoPng(basePng, {
+            chara: utf8ToBase64(JSON.stringify(cardV2)),
+            ccv3: utf8ToBase64(JSON.stringify(cardV3)),
+        });
+
+        const built = { name, cardV2, cardV3, _pngBytes: pngBytes };
+
+        if (settings.importToTavern) {
+            await importProfileToTavern(built);
+            log(`已生成并导入剧情卡「${name}」，选它开新聊天即可`);
+            toast('success', `已导入剧情卡「${name}」`);
+        } else {
+            downloadBytes(pngBytes, `${safeFileName(name)}.png`);
+            log(`已导出剧情卡「${name}」`);
+        }
+    } catch (error) {
+        log(`生成剧情卡失败：${error.message}`, 'error');
+        toast('error', `生成剧情卡失败：${error.message}`);
     }
 }
 
